@@ -11,7 +11,6 @@ use bevy::{
     color::palettes::css::CRIMSON,
     ecs::component::Mutable,
     ecs::spawn::{SpawnIter, SpawnWith},
-    prelude::*,
 };
 
 use crate::{DisplayQuality, GameState, Setting, Volume};

@@ -5,11 +5,8 @@ use bevy::prelude::*;
 
 const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 
-use bevy::{
-    color::palettes::basic::{BLUE, LIME},
-};
 
-use crate::{GameState, Volume};
+use crate::GameState;
 
 // This plugin will contain the game. In this case, it's just be a screen that will
 // display the current settings for 5 seconds before returning to the menu
@@ -63,7 +60,7 @@ fn setup_instructions(mut commands: Commands) {
 }
 
 fn setup_camera(mut commands: Commands) {
-    commands.spawn((Camera2d, Bloom::NATURAL));
+    // commands.spawn((Camera2d, Bloom::NATURAL));
 }
 
 /// Update the camera position by tracking the player.

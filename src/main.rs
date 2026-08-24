@@ -4,6 +4,7 @@
 mod menu;
 mod game;
 
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 
 // Enum that will be used as a global state for the game
@@ -45,7 +46,7 @@ fn main() {
 }
 
 pub fn setup(mut commands: Commands) {
-    commands.spawn(Camera2d);
+    commands.spawn((Camera2d, Bloom::NATURAL));
 }
 
 mod splash {
