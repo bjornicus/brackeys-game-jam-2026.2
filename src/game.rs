@@ -14,104 +14,106 @@ use crate::{GameState, Volume};
 // This plugin will contain the game. In this case, it's just be a screen that will
 // display the current settings for 5 seconds before returning to the menu
 pub fn game_plugin(app: &mut App) {
-    app.add_systems(OnEnter(GameState::Game), game_setup)
-        .add_systems(Update, game.run_if(in_state(GameState::Game)));
+    app
+        .add_systems(OnEnter(GameState::Game), (setup_scene, setup_instructions, setup_camera))
+        .add_systems(Update, (move_player, update_camera).chain().run_if(in_state(GameState::Game)));
 }
 
-// Tag component used to tag entities added on the game screen
+use bevy::{post_process::bloom::Bloom};
+
+/// Player movement speed factor.
+const PLAYER_SPEED: f32 = 100.;
+
+/// How quickly should the camera snap to the desired location.
+const CAMERA_DECAY_RATE: f32 = 2.;
+
 #[derive(Component)]
-struct OnGameScreen;
+struct Player;
 
-#[derive(Resource, Deref, DerefMut)]
-struct GameTimer(Timer);
-
-fn game_setup(
+fn setup_scene(
     mut commands: Commands,
-    display_quality: Res<crate::DisplayQuality>,
-    volume: Res<crate::Volume>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
+    // World where we move the player
     commands.spawn((
-        DespawnOnExit(GameState::Game),
+        Mesh2d(meshes.add(Rectangle::new(1000., 700.))),
+        MeshMaterial2d(materials.add(Color::srgb(0.2, 0.2, 0.3))),
+    ));
+
+    // Player
+    commands.spawn((
+        Player,
+        Mesh2d(meshes.add(Circle::new(25.))),
+        MeshMaterial2d(materials.add(Color::srgb(6.25, 9.4, 9.1))), // RGB values exceed 1 to achieve a bright color for the bloom effect
+        Transform::from_xyz(0., 0., 2.),
+    ));
+}
+
+fn setup_instructions(mut commands: Commands) {
+    commands.spawn((
+        Text::new("Move the light with WASD.\nThe camera will smoothly track the light."),
         Node {
-            width: percent(100),
-            height: percent(100),
-            // center children
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
+            position_type: PositionType::Absolute,
+            bottom: px(12),
+            left: px(12),
             ..default()
         },
-        OnGameScreen,
-        children![(
-            Node {
-                // This will display its children in a column, from top to bottom
-                flex_direction: FlexDirection::Column,
-                // `align_items` will align children on the cross axis. Here the main axis is
-                // vertical (column), so the cross axis is horizontal. This will center the
-                // children
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::BLACK),
-            children![
-                (
-                    Text::new("Will be back to the menu shortly..."),
-                    TextFont {
-                        font_size: FontSize::Px(67.0),
-                        ..default()
-                    },
-                    TextColor(TEXT_COLOR),
-                    Node {
-                        margin: UiRect::all(px(50)),
-                        ..default()
-                    },
-                ),
-                (
-                    Text::default(),
-                    Node {
-                        margin: UiRect::all(px(50)),
-                        ..default()
-                    },
-                    children![
-                        (
-                            TextSpan(format!("quality: {:?}", *display_quality)),
-                            TextFont {
-                                font_size: FontSize::Px(50.0),
-                                ..default()
-                            },
-                            TextColor(BLUE.into()),
-                        ),
-                        (
-                            TextSpan::new(" - "),
-                            TextFont {
-                                font_size: FontSize::Px(50.0),
-                                ..default()
-                            },
-                            TextColor(TEXT_COLOR),
-                        ),
-                        (
-                            TextSpan(format!("volume: {:?}", *volume)),
-                            TextFont {
-                                font_size: FontSize::Px(50.0),
-                                ..default()
-                            },
-                            TextColor(LIME.into()),
-                        ),
-                    ]
-                ),
-            ]
-        )],
     ));
-    // Spawn a 5 seconds timer to trigger going back to the menu
-    commands.insert_resource(GameTimer(Timer::from_seconds(5.0, TimerMode::Once)));
 }
 
-// Tick the timer, and change state when finished
-fn game(
-    time: Res<Time>,
-    mut game_state: ResMut<NextState<GameState>>,
-    mut timer: ResMut<GameTimer>,
-) {
-    if timer.tick(time.delta()).is_finished() {
-        game_state.set(GameState::Menu);
-    }
+fn setup_camera(mut commands: Commands) {
+    commands.spawn((Camera2d, Bloom::NATURAL));
 }
+
+/// Update the camera position by tracking the player.
+fn update_camera(
+    mut camera: Single<&mut Transform, (With<Camera2d>, Without<Player>)>,
+    player: Single<&Transform, (With<Player>, Without<Camera2d>)>,
+    time: Res<Time>,
+) {
+    let Vec3 { x, y, .. } = player.translation;
+    let direction = Vec3::new(x, y, camera.translation.z);
+
+    // Applies a smooth effect to camera movement using stable interpolation
+    // between the camera position and the player position on the x and y axes.
+    camera
+        .translation
+        .smooth_nudge(&direction, CAMERA_DECAY_RATE, time.delta_secs());
+}
+
+/// Update the player position with keyboard inputs.
+/// Note that the approach used here is for demonstration purposes only,
+/// as the point of this example is to showcase the camera tracking feature.
+///
+/// A more robust solution for player movement can be found in `examples/movement/physics_in_fixed_timestep.rs`.
+fn move_player(
+    mut player: Single<&mut Transform, With<Player>>,
+    time: Res<Time>,
+    kb_input: Res<ButtonInput<KeyCode>>,
+) {
+    let mut direction = Vec2::ZERO;
+
+    if kb_input.pressed(KeyCode::KeyW) {
+        direction.y += 1.;
+    }
+
+    if kb_input.pressed(KeyCode::KeyS) {
+        direction.y -= 1.;
+    }
+
+    if kb_input.pressed(KeyCode::KeyA) {
+        direction.x -= 1.;
+    }
+
+    if kb_input.pressed(KeyCode::KeyD) {
+        direction.x += 1.;
+    }
+
+    // Progressively update the player's position over time. Normalize the
+    // direction vector to prevent it from exceeding a magnitude of 1 when
+    // moving diagonally.
+    let move_delta = direction.normalize_or_zero() * PLAYER_SPEED * time.delta_secs();
+    player.translation += move_delta.extend(0.);
+}
+
