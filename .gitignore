@@ -1,0 +1,13 @@
+# Rust specific
+/target/
+
+# Unused by projects (optional)
+**/*.rs.bk
+
+# OS generated
+.DS_Store
+Thumbs.db
+
+# Other common
+*.log
+
