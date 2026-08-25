@@ -18,11 +18,12 @@ pub fn game_plugin(app: &mut App) {
             setup_instructions,
             spawn_character,
         ))
-        .add_systems(Update, (
-            control_character,
-            control_player,
-            update_camera,
-        ).chain().run_if(in_state(GameState::Game)));
+        .add_systems(
+            Update,
+            (control_character, update_camera)
+                .chain()
+                .run_if(in_state(GameState::Game)),
+        );
 }
 
 /// Player movement speed factor.
@@ -55,13 +56,6 @@ fn setup_scene(
         MeshMaterial2d(materials.add(Color::srgb(0.2, 0.2, 0.3))),
     ));
 
-    // Player
-    commands.spawn((
-        Player,
-        Mesh2d(meshes.add(Circle::new(25.))),
-        MeshMaterial2d(materials.add(Color::srgb(6.25, 9.4, 9.1))), // RGB values exceed 1 to achieve a bright color for the bloom effect
-        Transform::from_xyz(0., 0., 2.),
-    ));
 }
 
 fn spawn_character(
@@ -70,8 +64,6 @@ fn spawn_character(
     mut animations: ResMut<Assets<Animation>>,
     mut atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    commands.spawn(Camera2d);
-
     // Create the animations
 
     let image = assets.load("sprites/character.png");
@@ -87,11 +79,13 @@ fn spawn_character(
 
     let idle_animation_handle = animations.add(idle_animation);
 
-    // Run
+    // Movement animations. Row 2 faces left and row 3 faces right.
 
-    let run_animation = spritesheet.create_animation().add_row(3).build();
+    let move_left_animation = spritesheet.create_animation().add_row(2).build();
+    let move_left_animation_handle = animations.add(move_left_animation);
 
-    let run_animation_handle = animations.add(run_animation);
+    let move_right_animation = spritesheet.create_animation().add_row(3).build();
+    let move_right_animation_handle = animations.add(move_right_animation);
 
     // Shoot
 
@@ -106,8 +100,8 @@ fn spawn_character(
 
     commands.insert_resource(PlayerAnimations {
         idle: idle_animation_handle.clone(),
-        move_right: run_animation_handle.clone(),
-        move_left: run_animation_handle,
+        move_right: move_right_animation_handle,
+        move_left: move_left_animation_handle,
         shoot: shoot_animation_handle,
     });
 
@@ -117,12 +111,18 @@ fn spawn_character(
         .with_size_hint(768, 768)
         .sprite(&mut atlas_layouts);
 
-    commands.spawn((sprite, SpritesheetAnimation::new(idle_animation_handle)));
+    commands.spawn((
+        Player,
+        Facing::Right,
+        sprite,
+        SpritesheetAnimation::new(idle_animation_handle),
+        Transform::from_xyz(0., 0., 2.),
+    ));
 }
 
 fn setup_instructions(mut commands: Commands) {
     commands.spawn((
-        Text::new("Move the light with WASD.\nThe camera will smoothly track the light."),
+        Text::new("Move with WASD or arrow keys.\nThe camera will smoothly track the player."),
         Node {
             position_type: PositionType::Absolute,
             bottom: px(12),
@@ -148,41 +148,13 @@ fn update_camera(
         .smooth_nudge(&direction, CAMERA_DECAY_RATE, time.delta_secs());
 }
 
-/// Update the player position with keyboard inputs.
-/// Note that the approach used here is for demonstration purposes only,
-/// as the point of this example is to showcase the camera tracking feature.
-///
-/// A more robust solution for player movement can be found in `examples/movement/physics_in_fixed_timestep.rs`.
-fn control_player(
-    mut player: Single<&mut Transform, With<Player>>,
-    time: Res<Time>,
-    kb_input: Res<ButtonInput<KeyCode>>,
-) {
-    let mut direction = Vec2::ZERO;
-
-    if kb_input.pressed(KeyCode::KeyW) {
-        direction.y += 1.;
-    }
-
-    if kb_input.pressed(KeyCode::KeyS) {
-        direction.y -= 1.;
-    }
-
-    if kb_input.pressed(KeyCode::KeyA) {
-        direction.x -= 1.;
-    }
-
-    if kb_input.pressed(KeyCode::KeyD) {
-        direction.x += 1.;
-    }
-
-    // Progressively update the player's position over time. Normalize the
-    // direction vector to prevent it from exceeding a magnitude of 1 when
-    // moving diagonally.
-    let move_delta = direction.normalize_or_zero() * PLAYER_SPEED * time.delta_secs();
-    player.translation += move_delta.extend(0.);
+// Records the last horizontal direction so vertical-only movement can use the
+// corresponding movement animation.
+#[derive(Component, Clone, Copy)]
+enum Facing {
+    Left,
+    Right,
 }
-
 
 // Component to mark that a character is currently shooting
 #[derive(Component)]
@@ -194,9 +166,9 @@ fn control_character(
     mut commands: Commands,
     character: Single<(
         Entity,
-        &mut Sprite,
         &mut SpritesheetAnimation,
         &mut Transform,
+        &mut Facing,
         Option<&Shooting>,
     )>,
     my_animations: Res<PlayerAnimations>,
@@ -204,9 +176,7 @@ fn control_character(
 ) {
     // Control the character with the keyboard
 
-    const CHARACTER_SPEED: f32 = 150.0;
-
-    let (entity, mut sprite, mut animation, mut transform, shooting) = character.into_inner();
+    let (entity, mut animation, mut transform, mut facing, shooting) = character.into_inner();
 
     // If they're shooting, do nothing and wait for the animation to end
 
@@ -221,35 +191,42 @@ fn control_character(
 
             commands.entity(entity).insert(Shooting);
         }
-        // Run with the arrows
-        else if keyboard.pressed(KeyCode::ArrowLeft) || keyboard.pressed(KeyCode::ArrowRight) {
-            // Set the animation
-            //
-            // Only if not already running as we don't want to reset the animation in that case
-
-            if animation.animation != my_animations.move_right {
-                animation.switch(my_animations.move_right.clone());
-            }
-
-            // Move the entity and flip it horizontally depending on the direction
-
-            let translation = Vec3::X * time.delta_secs() * CHARACTER_SPEED;
-
-            if keyboard.pressed(KeyCode::ArrowLeft) {
-                transform.translation -= translation;
-                sprite.flip_x = true;
-            } else {
-                transform.translation += translation;
-                sprite.flip_x = false;
-            }
-        }
-        // Idle
         else {
-            // Set the animation
-            //
-            // Only if not already idle as we don't want to reset the animation in that case
+            let mut direction = Vec2::ZERO;
 
-            if animation.animation != my_animations.idle {
+            if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
+                direction.y += 1.;
+            }
+            if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
+                direction.y -= 1.;
+            }
+            if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
+                direction.x -= 1.;
+            }
+            if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
+                direction.x += 1.;
+            }
+
+            if direction != Vec2::ZERO {
+                // Horizontal input takes priority for diagonal movement. Vertical-only
+                // movement uses the most recently selected horizontal facing direction.
+                if direction.x < 0. {
+                    *facing = Facing::Left;
+                } else if direction.x > 0. {
+                    *facing = Facing::Right;
+                }
+
+                let movement_animation = match *facing {
+                    Facing::Left => &my_animations.move_left,
+                    Facing::Right => &my_animations.move_right,
+                };
+                if animation.animation != *movement_animation {
+                    animation.switch(movement_animation.clone());
+                }
+
+                let move_delta = direction.normalize() * PLAYER_SPEED * time.delta_secs();
+                transform.translation += move_delta.extend(0.);
+            } else if animation.animation != my_animations.idle {
                 animation.switch(my_animations.idle.clone());
             }
         }
