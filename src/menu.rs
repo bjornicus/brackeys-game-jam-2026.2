@@ -4,14 +4,14 @@
 
 use bevy::prelude::*;
 
-const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
-
 use bevy::{
     app::AppExit,
-    color::palettes::css::CRIMSON,
+    color::palettes::css::CORNFLOWER_BLUE,
     ecs::component::Mutable,
     ecs::spawn::{SpawnIter, SpawnWith},
 };
+const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
+const MENU_BACKGROUND_COLOR: Srgba = CORNFLOWER_BLUE;
 
 use crate::{DisplayQuality, GameState, Setting, Volume};
 
@@ -186,7 +186,7 @@ fn main_menu_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(CRIMSON.into()),
+            BackgroundColor(MENU_BACKGROUND_COLOR.into()),
             children![
                 // Display the game name
                 (
@@ -282,7 +282,7 @@ fn settings_menu_setup(mut commands: Commands) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(CRIMSON.into()),
+            BackgroundColor(MENU_BACKGROUND_COLOR.into()),
             Children::spawn(SpawnIter(
                 [
                     (MenuButtonAction::SettingsDisplay, "Display"),
@@ -342,7 +342,7 @@ fn display_settings_menu_setup(mut commands: Commands, display_quality: Res<Disp
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(CRIMSON.into()),
+            BackgroundColor(MENU_BACKGROUND_COLOR.into()),
             children![
                 // Create a new `Node`, this time not setting its `flex_direction`. It will
                 // use the default value, `FlexDirection::Row`, from left to right.
@@ -351,7 +351,7 @@ fn display_settings_menu_setup(mut commands: Commands, display_quality: Res<Disp
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BackgroundColor(CRIMSON.into()),
+                    BackgroundColor(MENU_BACKGROUND_COLOR.into()),
                     Children::spawn((
                         // Display a label for the current setting
                         Spawn((Text::new("Display Quality"), button_text_style())),
@@ -430,14 +430,14 @@ fn sound_settings_menu_setup(mut commands: Commands, volume: Res<Volume>) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(CRIMSON.into()),
+            BackgroundColor(MENU_BACKGROUND_COLOR.into()),
             children![
                 (
                     Node {
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    BackgroundColor(CRIMSON.into()),
+                    BackgroundColor(MENU_BACKGROUND_COLOR.into()),
                     Children::spawn((
                         Spawn((Text::new("Volume"), button_text_style.clone())),
                         SpawnWith(move |parent: &mut ChildSpawner| {

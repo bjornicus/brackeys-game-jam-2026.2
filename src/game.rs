@@ -12,11 +12,9 @@ use crate::GameState;
 // display the current settings for 5 seconds before returning to the menu
 pub fn game_plugin(app: &mut App) {
     app
-        .add_systems(OnEnter(GameState::Game), (setup_scene, setup_instructions, setup_camera))
+        .add_systems(OnEnter(GameState::Game), (setup_scene, setup_instructions))
         .add_systems(Update, (move_player, update_camera).chain().run_if(in_state(GameState::Game)));
 }
-
-use bevy::{post_process::bloom::Bloom};
 
 /// Player movement speed factor.
 const PLAYER_SPEED: f32 = 100.;
@@ -57,10 +55,6 @@ fn setup_instructions(mut commands: Commands) {
             ..default()
         },
     ));
-}
-
-fn setup_camera(mut commands: Commands) {
-    // commands.spawn((Camera2d, Bloom::NATURAL));
 }
 
 /// Update the camera position by tracking the player.
@@ -114,3 +108,5 @@ fn move_player(
     player.translation += move_delta.extend(0.);
 }
 
+
+//sprite animation
