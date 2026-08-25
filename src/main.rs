@@ -1,8 +1,8 @@
 //! This example will display a simple menu using Bevy UI where you can start a new game,
 //! change some settings or quit. There is no actual game, it will just display the current
 //! settings for 5 seconds before going back to the menu.
-mod menu;
 mod game;
+mod menu;
 
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -17,18 +17,10 @@ enum GameState {
     Game,
 }
 
-// One of the two settings that can be set through the menu. It will be a resource in the app
-#[derive(Resource, Debug, PartialEq, Eq, Clone, Copy)]
-pub(crate) enum DisplayQuality {
-    Low,
-    Medium,
-    High,
-}
-
 #[derive(Component)]
 struct Setting<T>(T);
 
-// One of the two settings that can be set through the menu. It will be a resource in the app
+// The setting that can be configured through the menu. It is a resource in the app
 #[derive(Resource, Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) struct Volume(pub u32);
 
@@ -37,19 +29,14 @@ fn main() {
         .add_plugins((
             DefaultPlugins.set(ImagePlugin::default_nearest()), // prevents blurry sprites
             SpritesheetAnimationPlugin,
-        )) 
-        // Insert as resource the initial value for the settings resources
-        .insert_resource(DisplayQuality::Medium)// TODO remove this option
+        ))
+        // Insert the initial value for the settings resource
         .insert_resource(Volume(7))
         // Declare the game state, whose starting value is determined by the `Default` trait
         .init_state::<GameState>()
         .add_systems(Startup, setup_camera)
         // Adds the plugins for each state
-        .add_plugins((
-            splash::splash_plugin, 
-            menu::menu_plugin, 
-            game::game_plugin),
-        )
+        .add_plugins((splash::splash_plugin, menu::menu_plugin, game::game_plugin))
         .run();
 }
 

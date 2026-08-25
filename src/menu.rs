@@ -5,20 +5,15 @@
 use bevy::prelude::*;
 
 use bevy::{
-    app::AppExit,
-    color::palettes::css::CORNFLOWER_BLUE,
-    ecs::component::Mutable,
-    ecs::spawn::{SpawnIter, SpawnWith},
+    app::AppExit, color::palettes::css::CORNFLOWER_BLUE, ecs::component::Mutable,
+    ecs::spawn::SpawnWith,
 };
 const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 const MENU_BACKGROUND_COLOR: Srgba = CORNFLOWER_BLUE;
 
-use crate::{DisplayQuality, GameState, Setting, Volume};
+use crate::{GameState, Setting, Volume};
 
-// This plugin manages the menu, with 5 different screens:
-// - a main menu with "New Game", "Settings", "Quit"
-// - a settings menu with two submenus and a back button
-// - two settings screen with a setting that can be set and a back button
+// This plugin manages the menu, with a main menu and a sound settings screen.
 pub fn menu_plugin(app: &mut App) {
     app
         // At start, the menu is not enabled. This will be changed in `menu_setup` when
@@ -28,17 +23,6 @@ pub fn menu_plugin(app: &mut App) {
         .add_systems(OnEnter(GameState::Menu), menu_setup)
         // Systems to handle the main menu screen
         .add_systems(OnEnter(MenuState::Main), main_menu_setup)
-        // Systems to handle the settings menu screen
-        .add_systems(OnEnter(MenuState::Settings), settings_menu_setup)
-        // Systems to handle the display settings screen
-        .add_systems(
-            OnEnter(MenuState::SettingsDisplay),
-            display_settings_menu_setup,
-        )
-        .add_systems(
-            Update,
-            (setting_button::<DisplayQuality>.run_if(in_state(MenuState::SettingsDisplay)),),
-        )
         // Systems to handle the sound settings screen
         .add_systems(OnEnter(MenuState::SettingsSound), sound_settings_menu_setup)
         .add_systems(
@@ -56,8 +40,6 @@ pub fn menu_plugin(app: &mut App) {
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
 enum MenuState {
     Main,
-    Settings,
-    SettingsDisplay,
     SettingsSound,
     #[default]
     Disabled,
@@ -66,14 +48,6 @@ enum MenuState {
 // Tag component used to tag entities added on the main menu screen
 #[derive(Component)]
 struct OnMainMenuScreen;
-
-// Tag component used to tag entities added on the settings menu screen
-#[derive(Component)]
-struct OnSettingsMenuScreen;
-
-// Tag component used to tag entities added on the display settings menu screen
-#[derive(Component)]
-struct OnDisplaySettingsMenuScreen;
 
 // Tag component used to tag entities added on the sound settings menu screen
 #[derive(Component)]
@@ -93,10 +67,7 @@ struct SelectedOption;
 enum MenuButtonAction {
     Play,
     Settings,
-    SettingsDisplay,
-    SettingsSound,
     BackToMainMenu,
-    BackToSettings,
     Quit,
 }
 
@@ -248,153 +219,6 @@ fn main_menu_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     ));
 }
 
-fn settings_menu_setup(mut commands: Commands) {
-    let button_node = Node {
-        width: px(200),
-        height: px(65),
-        margin: UiRect::all(px(20)),
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::Center,
-        ..default()
-    };
-
-    let button_text_style = (
-        TextFont {
-            font_size: FontSize::Px(33.0),
-            ..default()
-        },
-        TextColor(TEXT_COLOR),
-    );
-
-    commands.spawn((
-        DespawnOnExit(MenuState::Settings),
-        Node {
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        OnSettingsMenuScreen,
-        children![(
-            Node {
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(MENU_BACKGROUND_COLOR.into()),
-            Children::spawn(SpawnIter(
-                [
-                    (MenuButtonAction::SettingsDisplay, "Display"),
-                    (MenuButtonAction::SettingsSound, "Sound"),
-                    (MenuButtonAction::BackToMainMenu, "Back"),
-                ]
-                .into_iter()
-                .map(move |(action, text)| {
-                    (
-                        Button,
-                        button_node.clone(),
-                        BackgroundColor(NORMAL_BUTTON),
-                        action,
-                        children![(Text::new(text), button_text_style.clone())],
-                    )
-                })
-            ))
-        )],
-    ));
-}
-
-fn display_settings_menu_setup(mut commands: Commands, display_quality: Res<DisplayQuality>) {
-    fn button_node() -> Node {
-        Node {
-            width: px(200),
-            height: px(65),
-            margin: UiRect::all(px(20)),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        }
-    }
-    fn button_text_style() -> impl Bundle {
-        (
-            TextFont {
-                font_size: FontSize::Px(33.0),
-                ..default()
-            },
-            TextColor(TEXT_COLOR),
-        )
-    }
-
-    let display_quality = *display_quality;
-    commands.spawn((
-        DespawnOnExit(MenuState::SettingsDisplay),
-        Node {
-            width: percent(100),
-            height: percent(100),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        OnDisplaySettingsMenuScreen,
-        children![(
-            Node {
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(MENU_BACKGROUND_COLOR.into()),
-            children![
-                // Create a new `Node`, this time not setting its `flex_direction`. It will
-                // use the default value, `FlexDirection::Row`, from left to right.
-                (
-                    Node {
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(MENU_BACKGROUND_COLOR.into()),
-                    Children::spawn((
-                        // Display a label for the current setting
-                        Spawn((Text::new("Display Quality"), button_text_style())),
-                        SpawnWith(move |parent: &mut ChildSpawner| {
-                            for quality_setting in [
-                                DisplayQuality::Low,
-                                DisplayQuality::Medium,
-                                DisplayQuality::High,
-                            ] {
-                                let mut entity = parent.spawn((
-                                    Button,
-                                    Node {
-                                        width: px(150),
-                                        height: px(65),
-                                        ..button_node()
-                                    },
-                                    BackgroundColor(NORMAL_BUTTON),
-                                    Setting(quality_setting),
-                                    children![(
-                                        Text::new(format!("{quality_setting:?}")),
-                                        button_text_style(),
-                                    )],
-                                ));
-                                if display_quality == quality_setting {
-                                    entity.insert(SelectedOption);
-                                }
-                            }
-                        })
-                    ))
-                ),
-                // Display the back button to return to the settings screen
-                (
-                    Button,
-                    button_node(),
-                    BackgroundColor(NORMAL_BUTTON),
-                    MenuButtonAction::BackToSettings,
-                    children![(Text::new("Back"), button_text_style())]
-                )
-            ]
-        )],
-    ));
-}
-
 fn sound_settings_menu_setup(mut commands: Commands, volume: Res<Volume>) {
     let button_node = Node {
         width: px(200),
@@ -463,7 +287,7 @@ fn sound_settings_menu_setup(mut commands: Commands, volume: Res<Volume>) {
                     Button,
                     button_node,
                     BackgroundColor(NORMAL_BUTTON),
-                    MenuButtonAction::BackToSettings,
+                    MenuButtonAction::BackToMainMenu,
                     children![(Text::new("Back"), button_text_style)]
                 )
             ]
@@ -490,17 +314,8 @@ fn menu_action(
                     game_state.set(GameState::Game);
                     menu_state.set(MenuState::Disabled);
                 }
-                MenuButtonAction::Settings => menu_state.set(MenuState::Settings),
-                MenuButtonAction::SettingsDisplay => {
-                    menu_state.set(MenuState::SettingsDisplay);
-                }
-                MenuButtonAction::SettingsSound => {
-                    menu_state.set(MenuState::SettingsSound);
-                }
+                MenuButtonAction::Settings => menu_state.set(MenuState::SettingsSound),
                 MenuButtonAction::BackToMainMenu => menu_state.set(MenuState::Main),
-                MenuButtonAction::BackToSettings => {
-                    menu_state.set(MenuState::Settings);
-                }
             }
         }
     }

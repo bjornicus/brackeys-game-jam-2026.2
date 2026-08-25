@@ -6,24 +6,21 @@ use bevy_spritesheet_animation::prelude::*;
 
 const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 
-
 use crate::GameState;
 
 // This plugin will contain the game. In this case, it's just be a screen that will
 // display the current settings for 5 seconds before returning to the menu
 pub fn game_plugin(app: &mut App) {
-    app
-        .add_systems(OnEnter(GameState::Game), (
-            setup_scene,
-            setup_instructions,
-            spawn_character,
-        ))
-        .add_systems(
-            Update,
-            (control_character, update_camera)
-                .chain()
-                .run_if(in_state(GameState::Game)),
-        );
+    app.add_systems(
+        OnEnter(GameState::Game),
+        (setup_scene, setup_instructions, spawn_character),
+    )
+    .add_systems(
+        Update,
+        (control_character, update_camera)
+            .chain()
+            .run_if(in_state(GameState::Game)),
+    );
 }
 
 /// Player movement speed factor.
@@ -44,7 +41,6 @@ struct PlayerAnimations {
     shoot: Handle<Animation>,
 }
 
-
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -55,7 +51,6 @@ fn setup_scene(
         Mesh2d(meshes.add(Rectangle::new(1000., 700.))),
         MeshMaterial2d(materials.add(Color::srgb(0.2, 0.2, 0.3))),
     ));
-
 }
 
 fn spawn_character(
@@ -190,8 +185,7 @@ fn control_character(
             // Add a Shooting component
 
             commands.entity(entity).insert(Shooting);
-        }
-        else {
+        } else {
             let mut direction = Vec2::ZERO;
 
             if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
