@@ -6,6 +6,7 @@ mod game;
 
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy_spritesheet_animation::plugin::SpritesheetAnimationPlugin;
 
 // Enum that will be used as a global state for the game
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug, Hash, States)]
@@ -33,19 +34,26 @@ pub(crate) struct Volume(pub u32);
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest())) // prevents blurry sprites
+        .add_plugins((
+            DefaultPlugins.set(ImagePlugin::default_nearest()), // prevents blurry sprites
+            SpritesheetAnimationPlugin,
+        )) 
         // Insert as resource the initial value for the settings resources
-        .insert_resource(DisplayQuality::Medium)
+        .insert_resource(DisplayQuality::Medium)// TODO remove this option
         .insert_resource(Volume(7))
         // Declare the game state, whose starting value is determined by the `Default` trait
         .init_state::<GameState>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, setup_camera)
         // Adds the plugins for each state
-        .add_plugins((splash::splash_plugin, menu::menu_plugin, game::game_plugin))
+        .add_plugins((
+            splash::splash_plugin, 
+            menu::menu_plugin, 
+            game::game_plugin),
+        )
         .run();
 }
 
-pub fn setup(mut commands: Commands) {
+pub fn setup_camera(mut commands: Commands) {
     commands.spawn((Camera2d, Bloom::NATURAL));
 }
 
