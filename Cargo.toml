@@ -7,8 +7,8 @@ edition = "2024"
 name = "map_support"
 
 [dependencies]
-# bevy = { version = "0.19.1", features = ["dynamic_linking"] }
-bevy = { version = "0.19.1" }
+# bevy = { version = "0.19.1", features = ["dynamic_linking", "file_watcher"] }
+bevy = { version = "0.19.1", features = ["file_watcher"] }
 bevy_spritesheet_animation = "7.0.1"
 ron = "0.12.2"
 serde = { version = "1", features = ["derive"] }
