@@ -4,7 +4,7 @@
 use bevy::{app::AppExit, prelude::*};
 use bevy_spritesheet_animation::prelude::*;
 use map_support::{
-    map,
+    map::{self, TILE_SIZE, TerrainTile},
     tilemap::{self, TerrainAtlas, TerrainTilemapPlugin},
 };
 
@@ -17,7 +17,8 @@ use crate::GameState;
 
 // This plugin contains the game.
 pub fn game_plugin(app: &mut App) {
-    app.add_plugins(TerrainTilemapPlugin);
+    app.add_plugins(TerrainTilemapPlugin)
+        .init_resource::<CollisionDebug>();
     app.add_systems(
         OnEnter(GameState::Game),
         (setup_scene, setup_instructions, spawn_character),
@@ -25,7 +26,13 @@ pub fn game_plugin(app: &mut App) {
     .add_systems(OnEnter(GameState::Paused), pause_menu_setup)
     .add_systems(
         Update,
-        (control_character, update_camera, pause_game)
+        (
+            control_character,
+            update_camera,
+            pause_game,
+            toggle_collision_debug,
+            draw_collision_debug,
+        )
             .chain()
             .run_if(in_state(GameState::Game)),
     )
@@ -41,8 +48,26 @@ const PLAYER_SPEED: f32 = 100.;
 /// How quickly should the camera snap to the desired location.
 const CAMERA_DECAY_RATE: f32 = 2.;
 
+// Tune these values to match the visible feet/body contact area in the sprite.
+const PLAYER_COLLIDER_SIZE: Vec2 = Vec2::new(40.0, 20.0);
+const PLAYER_COLLIDER_OFFSET: Vec2 = Vec2::new(0.0, -24.0);
+
 #[derive(Component)]
 struct Player;
+
+#[derive(Component, Clone, Copy)]
+struct PlayerCollider {
+    size: Vec2,
+    offset: Vec2,
+}
+
+#[derive(Resource)]
+struct GameMap(map::MapData);
+
+#[derive(Resource, Default)]
+struct CollisionDebug {
+    enabled: bool,
+}
 
 #[derive(Resource)]
 struct GameInitialized;
@@ -76,6 +101,7 @@ fn setup_scene(
         warn!("Could not load initial map: {error}. Using the built-in map.");
         map::MapData::initial()
     });
+    commands.insert_resource(GameMap(map.clone()));
     tilemap::spawn_map(&mut commands, &terrain_atlas, &map);
 }
 
@@ -139,6 +165,10 @@ fn spawn_character(
 
     commands.spawn((
         Player,
+        PlayerCollider {
+            size: PLAYER_COLLIDER_SIZE,
+            offset: PLAYER_COLLIDER_OFFSET,
+        },
         Facing::Right,
         sprite,
         SpritesheetAnimation::new(idle_animation_handle),
@@ -165,6 +195,30 @@ fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitia
 fn pause_game(keyboard: Res<ButtonInput<KeyCode>>, mut game_state: ResMut<NextState<GameState>>) {
     if keyboard.just_pressed(KeyCode::Escape) {
         game_state.set(GameState::Paused);
+    }
+}
+
+fn toggle_collision_debug(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut collision_debug: ResMut<CollisionDebug>,
+) {
+    if keyboard.just_pressed(KeyCode::F3) {
+        collision_debug.enabled = !collision_debug.enabled;
+    }
+}
+
+fn draw_collision_debug(
+    collision_debug: Res<CollisionDebug>,
+    player: Single<(&Transform, &PlayerCollider), With<Player>>,
+    mut gizmos: Gizmos,
+) {
+    if collision_debug.enabled {
+        let (transform, collider) = *player;
+        gizmos.rect_2d(
+            transform.translation.xy() + collider.offset,
+            collider.size,
+            Color::srgb(1.0, 0.0, 1.0),
+        );
     }
 }
 
@@ -299,6 +353,56 @@ enum Facing {
 #[derive(Component)]
 struct Shooting;
 
+fn move_with_collision(
+    transform: &mut Transform,
+    collider: &PlayerCollider,
+    movement: Vec2,
+    map: &map::MapData,
+) {
+    let horizontal_movement = Vec2::new(movement.x, 0.0);
+    if can_occupy(
+        transform.translation.xy() + horizontal_movement,
+        collider,
+        map,
+    ) {
+        transform.translation += horizontal_movement.extend(0.0);
+    }
+
+    let vertical_movement = Vec2::new(0.0, movement.y);
+    if can_occupy(
+        transform.translation.xy() + vertical_movement,
+        collider,
+        map,
+    ) {
+        transform.translation += vertical_movement.extend(0.0);
+    }
+}
+
+fn can_occupy(position: Vec2, collider: &PlayerCollider, map: &map::MapData) -> bool {
+    let collider_center = position + collider.offset;
+    let half_size = collider.size / 2.0;
+    let min = collider_center - half_size;
+    let max = collider_center + half_size;
+    let half_tile = TILE_SIZE / 2.0;
+
+    // Tiles are centered on integer grid coordinates, so shift by half a tile before
+    // converting world positions to grid positions. The tiny epsilon keeps a collider
+    // that exactly touches an edge from entering the neighboring tile.
+    let min_x = ((min.x + half_tile) / TILE_SIZE).floor() as i32;
+    let max_x = ((max.x + half_tile - f32::EPSILON) / TILE_SIZE).floor() as i32;
+    let min_y = ((min.y + half_tile) / TILE_SIZE).floor() as i32;
+    let max_y = ((max.y + half_tile - f32::EPSILON) / TILE_SIZE).floor() as i32;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            if map.tile_at(x, y) != Some(TerrainTile::Floor) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn control_character(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -308,14 +412,17 @@ fn control_character(
         &mut SpritesheetAnimation,
         &mut Transform,
         &mut Facing,
+        &PlayerCollider,
         Option<&Shooting>,
     )>,
+    game_map: Res<GameMap>,
     my_animations: Res<PlayerAnimations>,
     mut messages: MessageReader<AnimationEvent>,
 ) {
     // Control the character with the keyboard
 
-    let (entity, mut animation, mut transform, mut facing, shooting) = character.into_inner();
+    let (entity, mut animation, mut transform, mut facing, collider, shooting) =
+        character.into_inner();
 
     // If they're shooting, do nothing and wait for the animation to end
 
@@ -363,7 +470,7 @@ fn control_character(
                 }
 
                 let move_delta = direction.normalize() * PLAYER_SPEED * time.delta_secs();
-                transform.translation += move_delta.extend(0.);
+                move_with_collision(&mut transform, collider, move_delta, &game_map.0);
             } else if animation.animation != my_animations.idle {
                 animation.switch(my_animations.idle.clone());
             }

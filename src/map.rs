@@ -50,6 +50,13 @@ impl MapData {
         Self { tiles }
     }
 
+    pub fn tile_at(&self, x: i32, y: i32) -> Option<TerrainTile> {
+        self.tiles
+            .iter()
+            .find(|entry| entry.x == x && entry.y == y)
+            .map(|entry| entry.tile)
+    }
+
     pub fn set(&mut self, x: i32, y: i32, tile: TerrainTile) {
         if let Some(existing) = self
             .tiles
