@@ -3,6 +3,10 @@
 
 use bevy::{app::AppExit, prelude::*};
 use bevy_spritesheet_animation::prelude::*;
+use map_support::{
+    map,
+    tilemap::{self, TerrainAtlas, TerrainTilemapPlugin},
+};
 
 const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 const PAUSE_BUTTON_NORMAL: Color = Color::srgb(0.18, 0.25, 0.38);
@@ -13,6 +17,7 @@ use crate::GameState;
 
 // This plugin contains the game.
 pub fn game_plugin(app: &mut App) {
+    app.add_plugins(TerrainTilemapPlugin);
     app.add_systems(
         OnEnter(GameState::Game),
         (setup_scene, setup_instructions, spawn_character),
@@ -59,8 +64,7 @@ struct PlayerAnimations {
 
 fn setup_scene(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    terrain_atlas: Res<TerrainAtlas>,
     initialized: Option<Res<GameInitialized>>,
 ) {
     if initialized.is_some() {
@@ -68,11 +72,11 @@ fn setup_scene(
     }
 
     commands.insert_resource(GameInitialized);
-    // World where we move the player
-    commands.spawn((
-        Mesh2d(meshes.add(Rectangle::new(1000., 700.))),
-        MeshMaterial2d(materials.add(Color::srgb(0.2, 0.2, 0.3))),
-    ));
+    let map = map::load_map("initial").unwrap_or_else(|error| {
+        warn!("Could not load initial map: {error}. Using the built-in map.");
+        map::MapData::initial()
+    });
+    tilemap::spawn_map(&mut commands, &terrain_atlas, &map);
 }
 
 fn spawn_character(
@@ -148,7 +152,7 @@ fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitia
     }
 
     commands.spawn((
-        Text::new("Move with WASD or arrow keys.\nThe camera will smoothly track the player."),
+        Text::new("Move with WASD or arrow keys. Fire with Space"),
         Node {
             position_type: PositionType::Absolute,
             bottom: px(12),
