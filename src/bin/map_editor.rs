@@ -179,6 +179,7 @@ fn save_map(keyboard: Res<ButtonInput<KeyCode>>, editor_map: Res<EditorMap>) {
 
 fn pan_camera(
     mouse: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window>,
     mut mouse_motion_events: MessageReader<MouseMotion>,
     mut camera: Single<(&mut Transform, &Projection), With<Camera2d>>,
 ) {
@@ -191,8 +192,13 @@ fn pan_camera(
         Projection::Orthographic(projection) => projection.scale,
         _ => 1.0,
     };
+    // MouseMotion uses physical pixels while the camera viewport uses logical pixels.
+    // Convert between them so panning stays one-to-one at any display scale factor.
+    let logical_scale = scale / window.scale_factor() as f32;
     for event in mouse_motion_events.read() {
-        camera.0.translation -= (event.delta * scale).extend(0.0);
+        // Keep the map under the cursor: screen Y grows downward, world Y grows upward.
+        let pan_delta = Vec2::new(-event.delta.x, event.delta.y) * logical_scale;
+        camera.0.translation += pan_delta.extend(0.0);
     }
 }
 
