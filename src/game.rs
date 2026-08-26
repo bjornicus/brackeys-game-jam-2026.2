@@ -11,8 +11,7 @@ const PAUSE_BUTTON_PRESSED: Color = Color::srgb(0.12, 0.65, 0.35);
 
 use crate::GameState;
 
-// This plugin will contain the game. In this case, it's just be a screen that will
-// display the current settings for 5 seconds before returning to the menu
+// This plugin contains the game.
 pub fn game_plugin(app: &mut App) {
     app.add_systems(
         OnEnter(GameState::Game),
