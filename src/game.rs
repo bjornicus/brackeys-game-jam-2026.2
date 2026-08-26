@@ -1,10 +1,13 @@
 //! There is no actual game, it will just display the current
 //! settings for 5 seconds before going back to the menu.
 
-use bevy::prelude::*;
+use bevy::{app::AppExit, prelude::*};
 use bevy_spritesheet_animation::prelude::*;
 
 const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
+const PAUSE_BUTTON_NORMAL: Color = Color::srgb(0.18, 0.25, 0.38);
+const PAUSE_BUTTON_HOVERED: Color = Color::srgb(0.25, 0.42, 0.65);
+const PAUSE_BUTTON_PRESSED: Color = Color::srgb(0.12, 0.65, 0.35);
 
 use crate::GameState;
 
@@ -15,11 +18,16 @@ pub fn game_plugin(app: &mut App) {
         OnEnter(GameState::Game),
         (setup_scene, setup_instructions, spawn_character),
     )
+    .add_systems(OnEnter(GameState::Paused), pause_menu_setup)
     .add_systems(
         Update,
-        (control_character, update_camera)
+        (control_character, update_camera, pause_game)
             .chain()
             .run_if(in_state(GameState::Game)),
+    )
+    .add_systems(
+        Update,
+        (pause_menu_action, pause_menu_button_system).run_if(in_state(GameState::Paused)),
     );
 }
 
@@ -31,6 +39,15 @@ const CAMERA_DECAY_RATE: f32 = 2.;
 
 #[derive(Component)]
 struct Player;
+
+#[derive(Resource)]
+struct GameInitialized;
+
+#[derive(Component)]
+enum PauseMenuAction {
+    Resume,
+    Quit,
+}
 
 // Let's use a custom resource to store our animations and access them across systems
 #[derive(Resource)]
@@ -45,7 +62,13 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    initialized: Option<Res<GameInitialized>>,
 ) {
+    if initialized.is_some() {
+        return;
+    }
+
+    commands.insert_resource(GameInitialized);
     // World where we move the player
     commands.spawn((
         Mesh2d(meshes.add(Rectangle::new(1000., 700.))),
@@ -58,7 +81,12 @@ fn spawn_character(
     assets: Res<AssetServer>,
     mut animations: ResMut<Assets<Animation>>,
     mut atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+    initialized: Option<Res<GameInitialized>>,
 ) {
+    if initialized.is_some() {
+        return;
+    }
+
     // Create the animations
 
     let image = assets.load("sprites/character.png");
@@ -115,7 +143,11 @@ fn spawn_character(
     ));
 }
 
-fn setup_instructions(mut commands: Commands) {
+fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitialized>>) {
+    if initialized.is_some() {
+        return;
+    }
+
     commands.spawn((
         Text::new("Move with WASD or arrow keys.\nThe camera will smoothly track the player."),
         Node {
@@ -125,6 +157,115 @@ fn setup_instructions(mut commands: Commands) {
             ..default()
         },
     ));
+}
+
+fn pause_game(keyboard: Res<ButtonInput<KeyCode>>, mut game_state: ResMut<NextState<GameState>>) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        game_state.set(GameState::Paused);
+    }
+}
+
+fn pause_menu_setup(mut commands: Commands) {
+    let button_node = Node {
+        width: px(200),
+        height: px(65),
+        margin: UiRect::all(px(10)),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        ..default()
+    };
+
+    commands.spawn((
+        DespawnOnExit(GameState::Paused),
+        Node {
+            width: percent(100),
+            height: percent(100),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        children![(
+            Node {
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::all(px(30)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.1, 0.1, 0.1)),
+            children![
+                (
+                    Text::new("Paused"),
+                    TextFont {
+                        font_size: FontSize::Px(48.0),
+                        ..default()
+                    }
+                ),
+                (
+                    Button,
+                    button_node.clone(),
+                    BackgroundColor(PAUSE_BUTTON_NORMAL),
+                    PauseMenuAction::Resume,
+                    children![(
+                        Text::new("Resume"),
+                        TextFont {
+                            font_size: FontSize::Px(28.0),
+                            ..default()
+                        },
+                        TextColor(TEXT_COLOR)
+                    )]
+                ),
+                (
+                    Button,
+                    button_node,
+                    BackgroundColor(PAUSE_BUTTON_NORMAL),
+                    PauseMenuAction::Quit,
+                    children![(
+                        Text::new("Quit"),
+                        TextFont {
+                            font_size: FontSize::Px(28.0),
+                            ..default()
+                        },
+                        TextColor(TEXT_COLOR)
+                    )]
+                )
+            ]
+        )],
+    ));
+}
+
+fn pause_menu_button_system(
+    mut interaction_query: Query<
+        (&Interaction, &mut BackgroundColor),
+        (Changed<Interaction>, With<Button>, With<PauseMenuAction>),
+    >,
+) {
+    for (interaction, mut background_color) in &mut interaction_query {
+        *background_color = match interaction {
+            Interaction::None => PAUSE_BUTTON_NORMAL.into(),
+            Interaction::Hovered => PAUSE_BUTTON_HOVERED.into(),
+            Interaction::Pressed => PAUSE_BUTTON_PRESSED.into(),
+        };
+    }
+}
+
+fn pause_menu_action(
+    interaction_query: Query<
+        (&Interaction, &PauseMenuAction),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut game_state: ResMut<NextState<GameState>>,
+    mut app_exit_writer: MessageWriter<AppExit>,
+) {
+    for (interaction, action) in &interaction_query {
+        if *interaction == Interaction::Pressed {
+            match action {
+                PauseMenuAction::Resume => game_state.set(GameState::Game),
+                PauseMenuAction::Quit => {
+                    app_exit_writer.write(AppExit::Success);
+                }
+            }
+        }
+    }
 }
 
 /// Update the camera position by tracking the player.

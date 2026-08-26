@@ -15,6 +15,7 @@ enum GameState {
     Splash,
     Menu,
     Game,
+    Paused,
 }
 
 #[derive(Component)]
