@@ -243,7 +243,7 @@
         (
             x: -3,
             y: 2,
-            tile: Wall,
+            tile: Floor,
         ),
         (
             x: -2,
@@ -258,7 +258,7 @@
         (
             x: 0,
             y: 2,
-            tile: Wall,
+            tile: Floor,
         ),
         (
             x: 1,
@@ -289,6 +289,166 @@
             x: -1,
             y: -2,
             tile: Floor,
+        ),
+        (
+            x: -5,
+            y: 3,
+            tile: Floor,
+        ),
+        (
+            x: -4,
+            y: 3,
+            tile: Floor,
+        ),
+        (
+            x: -3,
+            y: 3,
+            tile: Floor,
+        ),
+        (
+            x: -2,
+            y: 3,
+            tile: Floor,
+        ),
+        (
+            x: -1,
+            y: 3,
+            tile: Floor,
+        ),
+        (
+            x: -1,
+            y: 4,
+            tile: Floor,
+        ),
+        (
+            x: -2,
+            y: 4,
+            tile: Floor,
+        ),
+        (
+            x: -3,
+            y: 5,
+            tile: Floor,
+        ),
+        (
+            x: -2,
+            y: 5,
+            tile: Floor,
+        ),
+        (
+            x: -1,
+            y: 5,
+            tile: Floor,
+        ),
+        (
+            x: -2,
+            y: 6,
+            tile: Floor,
+        ),
+        (
+            x: -3,
+            y: 6,
+            tile: Floor,
+        ),
+        (
+            x: -4,
+            y: 6,
+            tile: Floor,
+        ),
+        (
+            x: -4,
+            y: 7,
+            tile: Floor,
+        ),
+        (
+            x: -3,
+            y: 7,
+            tile: Floor,
+        ),
+        (
+            x: -4,
+            y: 4,
+            tile: Wall,
+        ),
+        (
+            x: -3,
+            y: 4,
+            tile: Wall,
+        ),
+        (
+            x: -4,
+            y: 5,
+            tile: Wall,
+        ),
+        (
+            x: -1,
+            y: 6,
+            tile: Wall,
+        ),
+        (
+            x: 0,
+            y: 5,
+            tile: Wall,
+        ),
+        (
+            x: 0,
+            y: 4,
+            tile: Wall,
+        ),
+        (
+            x: 0,
+            y: 3,
+            tile: Floor,
+        ),
+        (
+            x: 1,
+            y: 3,
+            tile: Wall,
+        ),
+        (
+            x: -2,
+            y: 7,
+            tile: Wall,
+        ),
+        (
+            x: -5,
+            y: 7,
+            tile: Wall,
+        ),
+        (
+            x: -7,
+            y: 1,
+            tile: Wall,
+        ),
+        (
+            x: -5,
+            y: 6,
+            tile: Wall,
+        ),
+        (
+            x: -4,
+            y: 8,
+            tile: Wall,
+        ),
+        (
+            x: -3,
+            y: 8,
+            tile: Wall,
+        ),
+        (
+            x: -6,
+            y: 3,
+            tile: Wall,
+        ),
+        (
+            x: -2,
+            y: -1,
+            tile: Wall,
+        ),
+        (
+            x: 2,
+            y: 0,
+            tile: Wall,
         ),
     ],
 )
