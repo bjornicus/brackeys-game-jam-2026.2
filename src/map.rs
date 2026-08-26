@@ -13,15 +13,6 @@ pub enum TerrainTile {
     Wall,
 }
 
-impl TerrainTile {
-    pub const fn atlas_index(self) -> usize {
-        match self {
-            Self::Floor => 0,
-            Self::Wall => 1,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MapTile {
     pub x: i32,
@@ -73,6 +64,16 @@ impl MapData {
         let original_len = self.tiles.len();
         self.tiles.retain(|entry| entry.x != x || entry.y != y);
         self.tiles.len() != original_len
+    }
+
+    pub fn atlas_index_for(&self, tile: MapTile) -> usize {
+        match tile.tile {
+            TerrainTile::Floor => 0,
+            TerrainTile::Wall => {
+                let has_wall_south = self.tile_at(tile.x, tile.y - 1) == Some(TerrainTile::Wall);
+                if has_wall_south { 2 } else { 1 }
+            }
+        }
     }
 }
 

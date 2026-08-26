@@ -28,7 +28,7 @@ fn initialize_terrain_atlas(
         image: asset_server.load("sprites/terrain.png"),
         layout: layouts.add(TextureAtlasLayout::from_grid(
             UVec2::splat(TILE_SIZE as u32),
-            2,
+            6,
             1,
             None,
             None,
@@ -38,18 +38,23 @@ fn initialize_terrain_atlas(
 
 pub fn spawn_map(commands: &mut Commands, atlas: &TerrainAtlas, map: &MapData) {
     for tile in &map.tiles {
-        spawn_tile(commands, atlas, *tile);
+        spawn_tile(commands, atlas, *tile, map.atlas_index_for(*tile));
     }
 }
 
-pub fn spawn_tile(commands: &mut Commands, atlas: &TerrainAtlas, tile: MapTile) {
+pub fn spawn_tile(
+    commands: &mut Commands,
+    atlas: &TerrainAtlas,
+    tile: MapTile,
+    atlas_index: usize,
+) {
     commands.spawn((
         TerrainMapTile,
         Sprite {
             image: atlas.image.clone(),
             texture_atlas: Some(TextureAtlas {
                 layout: atlas.layout.clone(),
-                index: tile.tile.atlas_index(),
+                index: atlas_index,
             }),
             ..default()
         },
