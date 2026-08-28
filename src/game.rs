@@ -39,6 +39,8 @@ pub fn game_plugin(app: &mut App) {
             control_character,
             trigger_attack_fire_event,
             handle_lightning_attacks,
+            spawn_projectiles,
+            move_projectiles,
             apply_damage,
             tick_lightning_visuals,
             tick_attack_feedback,
@@ -89,6 +91,10 @@ struct CombatConfig {
     lightning_range: f32,
     lightning_damage: f32,
     lightning_visible_lifetime: f32,
+    projectile_speed: f32,
+    projectile_damage: f32,
+    projectile_collision_radius: f32,
+    projectile_maximum_lifetime: f32,
 }
 
 impl Default for CombatConfig {
@@ -97,6 +103,10 @@ impl Default for CombatConfig {
             lightning_range: 220.0,
             lightning_damage: 40.0,
             lightning_visible_lifetime: 0.18,
+            projectile_speed: 500.0,
+            projectile_damage: 30.0,
+            projectile_collision_radius: 6.0,
+            projectile_maximum_lifetime: 3.0,
         }
     }
 }
@@ -172,6 +182,24 @@ struct LightningVisual {
     start: Vec2,
     end: Vec2,
     remaining: f32,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+struct Projectile {
+    owner: Entity,
+    faction: Faction,
+    direction: Vec2,
+    speed: f32,
+    radius: f32,
+    damage: f32,
+    remaining_lifetime: f32,
+}
+
+#[allow(dead_code)]
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+enum Faction {
+    Player,
+    Enemy,
 }
 
 #[derive(Resource)]
@@ -311,6 +339,7 @@ fn spawn_character(
 
     commands.spawn((
         Player,
+        Faction::Player,
         PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
         Facing::Right,
         sprite,
@@ -628,6 +657,14 @@ fn nearest_segment_hit(
     end: Vec2,
     hitboxes: impl IntoIterator<Item = (Entity, Vec2, Collider)>,
 ) -> Option<Entity> {
+    nearest_segment_hit_with_time(start, end, hitboxes).map(|(entity, _)| entity)
+}
+
+fn nearest_segment_hit_with_time(
+    start: Vec2,
+    end: Vec2,
+    hitboxes: impl IntoIterator<Item = (Entity, Vec2, Collider)>,
+) -> Option<(Entity, f32)> {
     hitboxes
         .into_iter()
         .filter_map(|(entity, position, collider)| {
@@ -639,7 +676,59 @@ fn nearest_segment_hit(
                 .total_cmp(distance_b)
                 .then_with(|| entity_a.index().cmp(&entity_b.index()))
         })
-        .map(|(entity, _)| entity)
+}
+
+fn swept_circle_aabb_intersection(
+    start: Vec2,
+    end: Vec2,
+    radius: f32,
+    aabb: collision::Aabb,
+) -> Option<f32> {
+    collision::segment_first_aabb_intersection(
+        start,
+        end,
+        collision::Aabb {
+            min: aabb.min - Vec2::splat(radius),
+            max: aabb.max + Vec2::splat(radius),
+        },
+    )
+}
+
+fn projectile_terrain_hit_time(
+    start: Vec2,
+    end: Vec2,
+    radius: f32,
+    map: &map::MapData,
+) -> Option<f32> {
+    let min = start.min(end) - Vec2::splat(radius);
+    let max = start.max(end) + Vec2::splat(radius);
+    let (min_x, min_y) = collision::world_to_tile(min);
+    let (max_x, max_y) = collision::world_to_tile(max);
+
+    let mut earliest: Option<f32> = None;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            if map.tile_at(x, y) == Some(map::TerrainTile::Floor) {
+                continue;
+            }
+            if let Some(time) =
+                swept_circle_aabb_intersection(start, end, radius, collision::Aabb::tile(x, y))
+            {
+                earliest = Some(earliest.map_or(time, |current| current.min(time)));
+            }
+        }
+    }
+    earliest
+}
+
+fn projectile_hitbox_hit_time(
+    start: Vec2,
+    end: Vec2,
+    radius: f32,
+    position: Vec2,
+    collider: Collider,
+) -> Option<f32> {
+    swept_circle_aabb_intersection(start, end, radius, collider.aabb_at(position))
 }
 
 fn cursor_to_world(
@@ -861,6 +950,106 @@ fn handle_lightning_attacks(
     }
 }
 
+fn spawn_projectiles(
+    mut commands: Commands,
+    combat_config: Res<CombatConfig>,
+    mut attack_fired: MessageReader<AttackFired>,
+) {
+    for fired in attack_fired.read() {
+        if fired.request.kind != AttackKind::Projectile {
+            continue;
+        }
+
+        commands.spawn((
+            Projectile {
+                owner: fired.entity,
+                faction: Faction::Player,
+                direction: fired.request.direction.normalize_or_zero(),
+                speed: combat_config.projectile_speed,
+                radius: combat_config.projectile_collision_radius,
+                damage: combat_config.projectile_damage,
+                remaining_lifetime: combat_config.projectile_maximum_lifetime,
+            },
+            Sprite {
+                color: Color::srgb(1.0, 0.85, 0.2),
+                custom_size: Some(Vec2::splat(combat_config.projectile_collision_radius * 2.0)),
+                ..default()
+            },
+            Transform::from_xyz(fired.request.origin.x, fired.request.origin.y, 2.5),
+        ));
+    }
+}
+
+fn move_projectiles(
+    mut commands: Commands,
+    time: Res<Time>,
+    game_map: Res<GameMap>,
+    mut damage: MessageWriter<Damage>,
+    mut projectiles: Query<(Entity, &mut Projectile, &mut Transform)>,
+    hitboxes: Query<
+        (Entity, &Transform, &Hitbox, Option<&Faction>),
+        (With<Health>, Without<Projectile>),
+    >,
+) {
+    for (projectile_entity, mut projectile, mut transform) in &mut projectiles {
+        projectile.remaining_lifetime -= time.delta_secs();
+        if projectile.remaining_lifetime <= 0.0 {
+            commands.entity(projectile_entity).despawn();
+            continue;
+        }
+
+        let start = transform.translation.xy();
+        let movement = projectile.direction * projectile.speed * time.delta_secs();
+        let end = start + movement;
+
+        let terrain_hit = projectile_terrain_hit_time(start, end, projectile.radius, &game_map.0);
+        let entity_hit = hitboxes
+            .iter()
+            .filter(|(entity, _, _, faction)| {
+                *entity != projectile.owner
+                    && faction.is_none_or(|faction| *faction != projectile.faction)
+            })
+            .filter_map(|(entity, target_transform, hitbox, _)| {
+                projectile_hitbox_hit_time(
+                    start,
+                    end,
+                    projectile.radius,
+                    target_transform.translation.xy(),
+                    hitbox.0,
+                )
+                .map(|hit_time| (entity, hit_time))
+            })
+            .min_by(|(entity_a, time_a), (entity_b, time_b)| {
+                time_a
+                    .total_cmp(time_b)
+                    .then_with(|| entity_a.index().cmp(&entity_b.index()))
+            });
+
+        match (terrain_hit, entity_hit) {
+            (Some(terrain_time), Some((target, entity_time))) if entity_time < terrain_time => {
+                damage.write(Damage {
+                    target,
+                    amount: projectile.damage,
+                });
+                commands.entity(projectile_entity).despawn();
+            }
+            (None, Some((target, _))) => {
+                damage.write(Damage {
+                    target,
+                    amount: projectile.damage,
+                });
+                commands.entity(projectile_entity).despawn();
+            }
+            (Some(_), _) => {
+                commands.entity(projectile_entity).despawn();
+            }
+            (None, None) => {
+                transform.translation = end.extend(transform.translation.z);
+            }
+        }
+    }
+}
+
 fn apply_damage(mut damage: MessageReader<Damage>, mut health: Query<&mut Health>) {
     for damage in damage.read() {
         if let Ok(mut health) = health.get_mut(damage.target) {
@@ -973,6 +1162,7 @@ fn handle_attack_animation_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::time::TimeUpdateStrategy;
 
     #[test]
     fn dominant_axis_selects_cardinal_facing() {
@@ -1197,10 +1387,18 @@ mod tests {
     }
 
     fn flat_test_map() -> map::MapData {
+        floor_rect(-1..=1, -1..=1)
+    }
+
+    fn floor_rect(
+        xs: impl IntoIterator<Item = i32> + Clone,
+        ys: impl IntoIterator<Item = i32>,
+    ) -> map::MapData {
         map::MapData {
-            tiles: (-1..=1)
+            tiles: ys
+                .into_iter()
                 .flat_map(|y| {
-                    (-1..=1).map(move |x| map::MapTile {
+                    xs.clone().into_iter().map(move |x| map::MapTile {
                         x,
                         y,
                         tile: map::TerrainTile::Floor,
@@ -1285,6 +1483,299 @@ mod tests {
             query.iter(app.world()).count()
         };
         assert_eq!(visual_count, 0);
+    }
+
+    #[test]
+    fn projectile_spawn_uses_normalized_direction_independent_of_click_distance() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<AttackFired>()
+            .insert_resource(CombatConfig::default())
+            .add_systems(Update, spawn_projectiles);
+
+        let player = app.world_mut().spawn_empty().id();
+        for target in [Vec2::new(10.0, 0.0), Vec2::new(1000.0, 0.0)] {
+            app.world_mut()
+                .resource_mut::<Messages<AttackFired>>()
+                .write(AttackFired {
+                    entity: player,
+                    request: AttackRequest {
+                        kind: AttackKind::Projectile,
+                        origin: Vec2::ZERO,
+                        target,
+                        direction: (target - Vec2::ZERO).normalize(),
+                    },
+                });
+        }
+        app.update();
+
+        let mut query = app.world_mut().query::<&Projectile>();
+        let projectiles: Vec<_> = query.iter(app.world()).collect();
+        assert_eq!(projectiles.len(), 2);
+        assert!(
+            projectiles
+                .iter()
+                .all(|projectile| projectile.direction == Vec2::X)
+        );
+    }
+
+    #[test]
+    fn projectile_swept_tests_choose_earliest_wall_or_entity() {
+        let mut map = floor_rect(0..=3, -1..=1);
+        map.set(2, 0, map::TerrainTile::Wall);
+        let hitbox = Collider::new(Vec2::splat(20.0), Vec2::ZERO);
+
+        let start = Vec2::ZERO;
+        let end = Vec2::new(200.0, 0.0);
+        let wall_time = projectile_terrain_hit_time(start, end, 6.0, &map).unwrap();
+        let enemy_before_wall =
+            projectile_hitbox_hit_time(start, end, 6.0, Vec2::new(70.0, 0.0), hitbox).unwrap();
+        let enemy_after_wall =
+            projectile_hitbox_hit_time(start, end, 6.0, Vec2::new(170.0, 0.0), hitbox).unwrap();
+
+        assert!(enemy_before_wall < wall_time);
+        assert!(wall_time < enemy_after_wall);
+    }
+
+    #[test]
+    fn projectile_large_delta_hits_entity_once_and_ignores_owner_and_same_faction() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<Damage>()
+            .insert_resource(GameMap(floor_rect(-1..=4, -1..=1)))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.5),
+            ))
+            .add_systems(Update, (move_projectiles, apply_damage).chain());
+
+        let owner = app
+            .world_mut()
+            .spawn((
+                Faction::Player,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(40.0), Vec2::ZERO)),
+                Transform::from_xyz(20.0, 0.0, 0.0),
+            ))
+            .id();
+        let ally = app
+            .world_mut()
+            .spawn((
+                Faction::Player,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(40.0), Vec2::ZERO)),
+                Transform::from_xyz(50.0, 0.0, 0.0),
+            ))
+            .id();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Faction::Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Transform::from_xyz(120.0, 0.0, 0.0),
+            ))
+            .id();
+
+        app.world_mut().spawn((
+            Projectile {
+                owner,
+                faction: Faction::Player,
+                direction: Vec2::X,
+                speed: 500.0,
+                radius: 6.0,
+                damage: 30.0,
+                remaining_lifetime: 3.0,
+            },
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+
+        app.update();
+        app.update();
+
+        assert_eq!(
+            app.world().entity(owner).get::<Health>().unwrap().current,
+            100.0
+        );
+        assert_eq!(
+            app.world().entity(ally).get::<Health>().unwrap().current,
+            100.0
+        );
+        assert_eq!(
+            app.world().entity(enemy).get::<Health>().unwrap().current,
+            70.0
+        );
+        let projectile_count = {
+            let mut query = app.world_mut().query::<&Projectile>();
+            query.iter(app.world()).count()
+        };
+        assert_eq!(projectile_count, 0);
+    }
+
+    #[test]
+    fn projectile_nearest_of_multiple_enemies_uses_hit_time_not_spawn_order() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<Damage>()
+            .insert_resource(GameMap(floor_rect(-1..=5, -1..=1)))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.5),
+            ))
+            .add_systems(Update, (move_projectiles, apply_damage).chain());
+
+        let owner = app.world_mut().spawn_empty().id();
+        let far_enemy = app
+            .world_mut()
+            .spawn((
+                Faction::Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Transform::from_xyz(160.0, 0.0, 0.0),
+            ))
+            .id();
+        let near_enemy = app
+            .world_mut()
+            .spawn((
+                Faction::Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Transform::from_xyz(80.0, 0.0, 0.0),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Projectile {
+                owner,
+                faction: Faction::Player,
+                direction: Vec2::X,
+                speed: 500.0,
+                radius: 6.0,
+                damage: 30.0,
+                remaining_lifetime: 3.0,
+            },
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+
+        app.update();
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(near_enemy)
+                .get::<Health>()
+                .unwrap()
+                .current,
+            70.0
+        );
+        assert_eq!(
+            app.world()
+                .entity(far_enemy)
+                .get::<Health>()
+                .unwrap()
+                .current,
+            100.0
+        );
+    }
+
+    #[test]
+    fn projectile_wall_before_enemy_deals_no_damage() {
+        let mut map = floor_rect(-1..=4, -1..=1);
+        map.set(1, 0, map::TerrainTile::Wall);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<Damage>()
+            .insert_resource(GameMap(map))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.5),
+            ))
+            .add_systems(Update, (move_projectiles, apply_damage).chain());
+
+        let owner = app.world_mut().spawn_empty().id();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Faction::Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Transform::from_xyz(120.0, 0.0, 0.0),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Projectile {
+                owner,
+                faction: Faction::Player,
+                direction: Vec2::X,
+                speed: 500.0,
+                radius: 6.0,
+                damage: 30.0,
+                remaining_lifetime: 3.0,
+            },
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+
+        app.update();
+        app.update();
+
+        assert_eq!(
+            app.world().entity(enemy).get::<Health>().unwrap().current,
+            100.0
+        );
+        let projectile_count = {
+            let mut query = app.world_mut().query::<&Projectile>();
+            query.iter(app.world()).count()
+        };
+        assert_eq!(projectile_count, 0);
+    }
+
+    #[test]
+    fn projectile_lifetime_cleanup() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<Damage>()
+            .insert_resource(GameMap(floor_rect(-10..=10, -1..=1)))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.2),
+            ))
+            .add_systems(Update, move_projectiles);
+
+        let owner = app.world_mut().spawn_empty().id();
+        app.world_mut().spawn((
+            Projectile {
+                owner,
+                faction: Faction::Player,
+                direction: Vec2::X,
+                speed: 1.0,
+                radius: 6.0,
+                damage: 30.0,
+                remaining_lifetime: 0.1,
+            },
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+
+        app.update();
+        app.update();
+
+        let projectile_count = {
+            let mut query = app.world_mut().query::<&Projectile>();
+            query.iter(app.world()).count()
+        };
+        assert_eq!(projectile_count, 0);
     }
 
     #[test]

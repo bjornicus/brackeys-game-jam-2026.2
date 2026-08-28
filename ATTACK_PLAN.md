@@ -177,12 +177,12 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Fire a projectile beyond the click and reliably hit the nearest wall or entity.
 
-- [ ] Consume projectile fire events to spawn a visible placeholder projectile with normalized direction, speed, radius, damage, owner/faction, and lifetime.
-- [ ] Move using `delta_secs`, but use a swept segment/circle test from old to new position to prevent tunneling at low frame rates.
-- [ ] Find the earliest collision among terrain and eligible hitboxes. Resolve by distance/time of impact, not ECS iteration order.
-- [ ] On entity impact, emit damage once and despawn the projectile. On terrain impact, despawn without damage. Ignore the owner and same-faction entities.
-- [ ] Despawn after maximum lifetime as a safety net.
-- [ ] Preserve the rule that projectile direction continues beyond the clicked point.
+- [x] Consume projectile fire events to spawn a visible placeholder projectile with normalized direction, speed, radius, damage, owner/faction, and lifetime.
+- [x] Move using `delta_secs`, but use a swept segment/circle test from old to new position to prevent tunneling at low frame rates.
+- [x] Find the earliest collision among terrain and eligible hitboxes. Resolve by distance/time of impact, not ECS iteration order.
+- [x] On entity impact, emit damage once and despawn the projectile. On terrain impact, despawn without damage. Ignore the owner and same-faction entities.
+- [x] Despawn after maximum lifetime as a safety net.
+- [x] Preserve the rule that projectile direction continues beyond the clicked point.
 
 **Automated acceptance:** Tests cover direction independence from click distance, large-delta anti-tunneling, wall-before-enemy, enemy-before-wall, nearest of multiple enemies, owner exclusion, damage-once, and lifetime cleanup.
 
@@ -314,3 +314,4 @@ Add one short entry per completed step, for example:
 - `Step 3 — 2026-08-28`: Added a stdlib-only placeholder sprite generator, checked in fixed-layout player/enemy PNG sheets, documented replacement/layout details, and switched player animation setup to named four-way idle/move/shoot layout constants with dominant-axis facing tests. Files changed: `tools/generate_placeholder_sprites.py`, `assets/sprites/character_placeholder.png`, `assets/sprites/enemy_placeholder.png`, `assets/sprites/PLACEHOLDERS.md`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual movement smoke not run.
 - `Step 4 — 2026-08-28`: Added cursor-to-world aim capture, attack mode selection/HUD, `CombatConfig` lightning range, explicit player attack action state with immutable request data, firing-frame `AttackFired` message seam, and animation-end action completion with movement lock tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual click/facing/movement-lock smoke not run.
 - `Step 5 — 2026-08-28`: Added lightning range/rejection gizmo feedback, terrain segment obstruction checks, pre-animation lightning validation, short-lived jagged lightning visuals, generic `Hitbox`/`Health`/`Damage` plumbing, deterministic nearest-hit lightning damage, and tests for obstruction/range/hit ordering/damage-once behavior. Files changed: `src/collision.rs`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual lightning range/valid/rejected-cast smoke not run.
+- `Step 6 — 2026-08-28`: Added placeholder projectile spawning from projectile fire events, swept circle/AABB movement against terrain and hitboxes, earliest-impact resolution, owner/same-faction filtering, damage/despawn behavior, lifetime cleanup, and projectile coverage tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game projectile`, `cargo test`, and `cargo check --all-targets` passed. Manual projectile smoke not run.
