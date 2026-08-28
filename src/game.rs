@@ -23,7 +23,9 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<CombatConfig>()
         .init_resource::<SelectedAttackMode>()
         .init_resource::<CursorWorld>()
-        .add_message::<AttackFired>();
+        .init_resource::<AttackFeedback>()
+        .add_message::<AttackFired>()
+        .add_message::<Damage>();
     app.add_systems(
         OnEnter(GameState::Game),
         (setup_scene, setup_instructions, spawn_character),
@@ -36,8 +38,14 @@ pub fn game_plugin(app: &mut App) {
             select_attack_mode,
             control_character,
             trigger_attack_fire_event,
+            handle_lightning_attacks,
+            apply_damage,
+            tick_lightning_visuals,
+            tick_attack_feedback,
             handle_attack_animation_events,
             update_attack_hud,
+            draw_lightning_range_feedback,
+            draw_lightning_visuals,
             update_camera,
             pause_game,
             toggle_collision_debug,
@@ -79,12 +87,16 @@ struct CollisionDebug {
 #[derive(Resource, Clone, Copy, Debug)]
 struct CombatConfig {
     lightning_range: f32,
+    lightning_damage: f32,
+    lightning_visible_lifetime: f32,
 }
 
 impl Default for CombatConfig {
     fn default() -> Self {
         Self {
             lightning_range: 220.0,
+            lightning_damage: 40.0,
+            lightning_visible_lifetime: 0.18,
         }
     }
 }
@@ -118,8 +130,49 @@ impl Default for SelectedAttackMode {
 #[derive(Resource, Default, Clone, Copy, Debug)]
 struct CursorWorld(Option<Vec2>);
 
+#[derive(Resource, Default, Clone, Copy, Debug)]
+struct AttackFeedback {
+    rejection: Option<AttackRejection>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AttackRejection {
+    target: Vec2,
+    remaining: f32,
+    reason: RejectionReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RejectionReason {
+    OutOfRange,
+    Obstructed,
+}
+
 #[derive(Component)]
 struct AttackHud;
+
+#[derive(Component, Clone, Copy, Debug)]
+struct Hitbox(Collider);
+
+#[allow(dead_code)]
+#[derive(Component, Clone, Copy, Debug)]
+struct Health {
+    current: f32,
+    max: f32,
+}
+
+#[derive(Message, Clone, Copy, Debug)]
+struct Damage {
+    target: Entity,
+    amount: f32,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+struct LightningVisual {
+    start: Vec2,
+    end: Vec2,
+    remaining: f32,
+}
 
 #[derive(Resource)]
 struct GameInitialized;
@@ -273,7 +326,7 @@ fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitia
 
     commands.spawn((
         AttackHud,
-        Text::new(format_attack_hud(AttackMode::Auto)),
+        Text::new(format_attack_hud(AttackMode::Auto, None)),
         Node {
             position_type: PositionType::Absolute,
             bottom: px(12),
@@ -538,11 +591,55 @@ fn attack_direction_and_facing(
     }
 }
 
-fn format_attack_hud(mode: AttackMode) -> String {
+fn format_attack_hud(mode: AttackMode, rejection: Option<RejectionReason>) -> String {
+    let status = match rejection {
+        Some(RejectionReason::OutOfRange) => " | Lightning rejected: target out of range",
+        Some(RejectionReason::Obstructed) => " | Lightning rejected: terrain blocks the path",
+        None => "",
+    };
     format!(
-        "Move: WASD/arrows | Fire: left click | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {} | Pause: Esc | Debug: F3",
-        mode.label()
+        "Move: WASD/arrows | Fire: left click | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
+        mode.label(),
+        status
     )
+}
+
+fn validate_attack_request(
+    kind: AttackKind,
+    origin: Vec2,
+    target: Vec2,
+    combat_config: CombatConfig,
+    map: &map::MapData,
+) -> Result<(), RejectionReason> {
+    if kind == AttackKind::Lightning {
+        if origin.distance(target) > combat_config.lightning_range {
+            return Err(RejectionReason::OutOfRange);
+        }
+        if collision::terrain_blocks_segment(origin, target, map) {
+            return Err(RejectionReason::Obstructed);
+        }
+    }
+
+    Ok(())
+}
+
+fn nearest_segment_hit(
+    start: Vec2,
+    end: Vec2,
+    hitboxes: impl IntoIterator<Item = (Entity, Vec2, Collider)>,
+) -> Option<Entity> {
+    hitboxes
+        .into_iter()
+        .filter_map(|(entity, position, collider)| {
+            collision::segment_first_aabb_intersection(start, end, collider.aabb_at(position))
+                .map(|distance| (entity, distance))
+        })
+        .min_by(|(entity_a, distance_a), (entity_b, distance_b)| {
+            distance_a
+                .total_cmp(distance_b)
+                .then_with(|| entity_a.index().cmp(&entity_b.index()))
+        })
+        .map(|(entity, _)| entity)
 }
 
 fn cursor_to_world(
@@ -579,10 +676,14 @@ fn select_attack_mode(
 
 fn update_attack_hud(
     selected_mode: Res<SelectedAttackMode>,
+    feedback: Res<AttackFeedback>,
     mut hud: Single<&mut Text, With<AttackHud>>,
 ) {
-    if selected_mode.is_changed() {
-        **hud = Text::new(format_attack_hud(selected_mode.0));
+    if selected_mode.is_changed() || feedback.is_changed() {
+        **hud = Text::new(format_attack_hud(
+            selected_mode.0,
+            feedback.rejection.map(|rejection| rejection.reason),
+        ));
     }
 }
 
@@ -620,6 +721,7 @@ fn control_character(
     selected_mode: Res<SelectedAttackMode>,
     combat_config: Res<CombatConfig>,
     cursor_world: Res<CursorWorld>,
+    mut feedback: ResMut<AttackFeedback>,
 ) {
     let (entity, mut animation, mut transform, mut facing, collider, action) =
         character.into_inner();
@@ -632,6 +734,23 @@ fn control_character(
         && let Some(target) = cursor_world.0
     {
         let origin = transform.translation.xy();
+        let kind = resolve_attack_kind(
+            selected_mode.0,
+            origin,
+            target,
+            combat_config.lightning_range,
+        );
+        if let Err(reason) =
+            validate_attack_request(kind, origin, target, *combat_config, &game_map.0)
+        {
+            feedback.rejection = Some(AttackRejection {
+                target,
+                remaining: 0.45,
+                reason,
+            });
+            return;
+        }
+
         let (direction, aim_facing) = attack_direction_and_facing(origin, target, *facing);
         *facing = aim_facing;
 
@@ -640,12 +759,7 @@ fn control_character(
 
         commands.entity(entity).insert(PlayerAction {
             request: AttackRequest {
-                kind: resolve_attack_kind(
-                    selected_mode.0,
-                    origin,
-                    target,
-                    combat_config.lightning_range,
-                ),
+                kind,
                 origin,
                 target,
                 direction,
@@ -707,6 +821,113 @@ fn trigger_attack_fire_event(
             request: action.request.clone(),
         });
         action.fired = true;
+    }
+}
+
+fn handle_lightning_attacks(
+    mut commands: Commands,
+    combat_config: Res<CombatConfig>,
+    mut attack_fired: MessageReader<AttackFired>,
+    mut damage: MessageWriter<Damage>,
+    hitboxes: Query<(Entity, &Transform, &Hitbox), With<Health>>,
+) {
+    for fired in attack_fired.read() {
+        if fired.request.kind != AttackKind::Lightning {
+            continue;
+        }
+
+        commands.spawn((
+            LightningVisual {
+                start: fired.request.origin,
+                end: fired.request.target,
+                remaining: combat_config.lightning_visible_lifetime,
+            },
+            Transform::default(),
+        ));
+
+        if let Some(target) = nearest_segment_hit(
+            fired.request.origin,
+            fired.request.target,
+            hitboxes
+                .iter()
+                .filter(|(entity, _, _)| *entity != fired.entity)
+                .map(|(entity, transform, hitbox)| (entity, transform.translation.xy(), hitbox.0)),
+        ) {
+            damage.write(Damage {
+                target,
+                amount: combat_config.lightning_damage,
+            });
+        }
+    }
+}
+
+fn apply_damage(mut damage: MessageReader<Damage>, mut health: Query<&mut Health>) {
+    for damage in damage.read() {
+        if let Ok(mut health) = health.get_mut(damage.target) {
+            health.current = (health.current - damage.amount).max(0.0);
+        }
+    }
+}
+
+fn tick_lightning_visuals(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut visuals: Query<(Entity, &mut LightningVisual)>,
+) {
+    for (entity, mut visual) in &mut visuals {
+        visual.remaining -= time.delta_secs();
+        if visual.remaining <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn tick_attack_feedback(time: Res<Time>, mut feedback: ResMut<AttackFeedback>) {
+    if let Some(mut rejection) = feedback.rejection {
+        rejection.remaining -= time.delta_secs();
+        feedback.rejection = (rejection.remaining > 0.0).then_some(rejection);
+    }
+}
+
+fn draw_lightning_range_feedback(
+    selected_mode: Res<SelectedAttackMode>,
+    combat_config: Res<CombatConfig>,
+    feedback: Res<AttackFeedback>,
+    player: Single<&Transform, With<Player>>,
+    mut gizmos: Gizmos,
+) {
+    if matches!(selected_mode.0, AttackMode::Lightning | AttackMode::Auto) {
+        gizmos.circle_2d(
+            player.translation.xy(),
+            combat_config.lightning_range,
+            Color::srgba(0.25, 0.65, 1.0, 0.65),
+        );
+    }
+
+    if let Some(rejection) = feedback.rejection {
+        gizmos.circle_2d(rejection.target, 14.0, Color::srgba(1.0, 0.0, 0.0, 0.9));
+    }
+}
+
+fn draw_lightning_visuals(mut gizmos: Gizmos, visuals: Query<&LightningVisual>) {
+    for visual in &visuals {
+        let delta = visual.end - visual.start;
+        let normal = if delta == Vec2::ZERO {
+            Vec2::Y
+        } else {
+            Vec2::new(-delta.y, delta.x).normalize()
+        };
+        let mut previous = visual.start;
+        for i in 1..=6 {
+            let t = i as f32 / 6.0;
+            let mut point = visual.start.lerp(visual.end, t);
+            if i != 6 {
+                let offset = if i % 2 == 0 { -8.0 } else { 8.0 };
+                point += normal * offset;
+            }
+            gizmos.line_2d(previous, point, Color::srgba(0.7, 0.95, 1.0, 1.0));
+            previous = point;
+        }
     }
 }
 
@@ -895,6 +1116,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lightning_validation_allows_range_equality_and_rejects_outside() {
+        let map = map::MapData::initial();
+        let config = CombatConfig::default();
+        assert_eq!(
+            validate_attack_request(
+                AttackKind::Lightning,
+                Vec2::ZERO,
+                Vec2::new(config.lightning_range, 0.0),
+                config,
+                &map,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_attack_request(
+                AttackKind::Lightning,
+                Vec2::ZERO,
+                Vec2::new(config.lightning_range + 0.1, 0.0),
+                config,
+                &map,
+            ),
+            Err(RejectionReason::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn lightning_validation_rejects_walls_and_missing_tiles() {
+        let mut map = map::MapData::default();
+        map.set(0, 0, map::TerrainTile::Floor);
+        map.set(1, 0, map::TerrainTile::Wall);
+        assert_eq!(
+            validate_attack_request(
+                AttackKind::Lightning,
+                Vec2::ZERO,
+                Vec2::new(map::TILE_SIZE, 0.0),
+                CombatConfig::default(),
+                &map,
+            ),
+            Err(RejectionReason::Obstructed)
+        );
+
+        map.set(1, 0, map::TerrainTile::Floor);
+        assert_eq!(
+            validate_attack_request(
+                AttackKind::Lightning,
+                Vec2::ZERO,
+                Vec2::new(map::TILE_SIZE * 2.0, 0.0),
+                CombatConfig::default(),
+                &map,
+            ),
+            Err(RejectionReason::Obstructed)
+        );
+    }
+
+    #[test]
+    fn lightning_hit_selection_uses_nearest_segment_distance() {
+        let first = Entity::from_raw_u32(10).unwrap();
+        let second = Entity::from_raw_u32(2).unwrap();
+        let hitbox = Collider::new(Vec2::splat(20.0), Vec2::ZERO);
+
+        let hit = nearest_segment_hit(
+            Vec2::ZERO,
+            Vec2::new(200.0, 0.0),
+            [
+                (first, Vec2::new(120.0, 0.0), hitbox),
+                (second, Vec2::new(60.0, 0.0), hitbox),
+            ],
+        );
+
+        assert_eq!(hit, Some(second));
+    }
+
     #[derive(Resource, Default)]
     struct FireCount(usize);
 
@@ -926,6 +1220,74 @@ mod tests {
     }
 
     #[test]
+    fn lightning_fire_damages_once_and_visual_expires() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<AttackFired>()
+            .add_message::<Damage>()
+            .insert_resource(CombatConfig {
+                lightning_visible_lifetime: 0.0,
+                ..default()
+            })
+            .add_systems(
+                Update,
+                (
+                    handle_lightning_attacks,
+                    apply_damage,
+                    tick_lightning_visuals,
+                )
+                    .chain(),
+            );
+
+        let player = app.world_mut().spawn_empty().id();
+        let target = app
+            .world_mut()
+            .spawn((
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Transform::from_xyz(50.0, 0.0, 0.0),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Messages<AttackFired>>()
+            .write(AttackFired {
+                entity: player,
+                request: AttackRequest {
+                    kind: AttackKind::Lightning,
+                    origin: Vec2::ZERO,
+                    target: Vec2::new(100.0, 0.0),
+                    direction: Vec2::X,
+                },
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(target).get::<Health>().unwrap().current,
+            60.0
+        );
+
+        app.update();
+        assert_eq!(
+            app.world().entity(target).get::<Health>().unwrap().current,
+            60.0
+        );
+
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0));
+        app.update();
+        app.update();
+        let visual_count = {
+            let mut query = app.world_mut().query::<&LightningVisual>();
+            query.iter(app.world()).count()
+        };
+        assert_eq!(visual_count, 0);
+    }
+
+    #[test]
     fn click_creates_one_fire_event_and_locks_movement_until_animation_completion() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -938,6 +1300,7 @@ mod tests {
             .insert_resource(SelectedAttackMode(AttackMode::Auto))
             .insert_resource(CombatConfig::default())
             .insert_resource(CursorWorld(Some(Vec2::new(10.0, 0.0))))
+            .init_resource::<AttackFeedback>()
             .init_resource::<FireCount>()
             .add_systems(
                 Update,

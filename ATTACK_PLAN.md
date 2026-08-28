@@ -160,14 +160,14 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Make short-range lightning visible, damaging, and terrain-blocked.
 
-- [ ] Draw a world-space lightning-range circle centered on the player while mode is `Lightning` or `Auto`. Use gizmos initially; keep its radius sourced from `CombatConfig`.
-- [ ] Add a pure grid traversal/segment test that reports whether a segment from attack origin to click crosses wall or missing terrain. Exact boundary behavior must be tested.
-- [ ] Forced lightning rejects out-of-range targets without entering the firing animation. Provide visible feedback (brief red range circle/target marker or HUD status), not only a log message.
-- [ ] Lightning and in-range automatic attacks reject terrain-obstructed targets before entering the firing animation. This is intentionally different from a projectile, which may launch and then hit a wall.
-- [ ] On the firing event, spawn a short-lived lightning visual from the player/weapon origin to the exact clicked point. A jagged line made from several segments is sufficient placeholder VFX.
-- [ ] Introduce `Hitbox`, `Health`, `Damage`, and a damage message/API without coupling it specifically to enemies.
-- [ ] Lightning damages the first damageable hitbox intersected along the segment. Wall validation occurs first. Keep hit ordering deterministic by segment distance rather than query iteration order.
-- [ ] Ensure one cast cannot damage the same entity repeatedly over the visual's lifetime.
+- [x] Draw a world-space lightning-range circle centered on the player while mode is `Lightning` or `Auto`. Use gizmos initially; keep its radius sourced from `CombatConfig`.
+- [x] Add a pure grid traversal/segment test that reports whether a segment from attack origin to click crosses wall or missing terrain. Exact boundary behavior must be tested.
+- [x] Forced lightning rejects out-of-range targets without entering the firing animation. Provide visible feedback (brief red range circle/target marker or HUD status), not only a log message.
+- [x] Lightning and in-range automatic attacks reject terrain-obstructed targets before entering the firing animation. This is intentionally different from a projectile, which may launch and then hit a wall.
+- [x] On the firing event, spawn a short-lived lightning visual from the player/weapon origin to the exact clicked point. A jagged line made from several segments is sufficient placeholder VFX.
+- [x] Introduce `Hitbox`, `Health`, `Damage`, and a damage message/API without coupling it specifically to enemies.
+- [x] Lightning damages the first damageable hitbox intersected along the segment. Wall validation occurs first. Keep hit ordering deterministic by segment distance rather than query iteration order.
+- [x] Ensure one cast cannot damage the same entity repeatedly over the visual's lifetime.
 
 **Automated acceptance:** Tests cover range equality, out-of-range rejection, unobstructed floor, wall/missing-tile obstruction, nearest-hit selection, and exactly-once damage.
 
@@ -313,3 +313,4 @@ Add one short entry per completed step, for example:
 - `Step 2 — 2026-08-28`: Added map editor enemy entity palette mode on key `3`, placeholder enemy markers, enemy-only placement/removal behavior with explicit-floor validation, marker redraw on map repaint, and pure helper/tests for entity placement validity. Files changed: `src/bin/map_editor.rs`, `src/map.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual editor smoke not run.
 - `Step 3 — 2026-08-28`: Added a stdlib-only placeholder sprite generator, checked in fixed-layout player/enemy PNG sheets, documented replacement/layout details, and switched player animation setup to named four-way idle/move/shoot layout constants with dominant-axis facing tests. Files changed: `tools/generate_placeholder_sprites.py`, `assets/sprites/character_placeholder.png`, `assets/sprites/enemy_placeholder.png`, `assets/sprites/PLACEHOLDERS.md`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual movement smoke not run.
 - `Step 4 — 2026-08-28`: Added cursor-to-world aim capture, attack mode selection/HUD, `CombatConfig` lightning range, explicit player attack action state with immutable request data, firing-frame `AttackFired` message seam, and animation-end action completion with movement lock tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual click/facing/movement-lock smoke not run.
+- `Step 5 — 2026-08-28`: Added lightning range/rejection gizmo feedback, terrain segment obstruction checks, pre-animation lightning validation, short-lived jagged lightning visuals, generic `Hitbox`/`Health`/`Damage` plumbing, deterministic nearest-hit lightning damage, and tests for obstruction/range/hit ordering/damage-once behavior. Files changed: `src/collision.rs`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual lightning range/valid/rejected-cast smoke not run.

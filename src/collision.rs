@@ -44,6 +44,73 @@ impl Aabb {
             && self.min.y < other.max.y
             && self.max.y > other.min.y
     }
+
+    pub fn tile(x: i32, y: i32) -> Self {
+        let half_tile = TILE_SIZE / 2.0;
+        let center = Vec2::new(x as f32 * TILE_SIZE, y as f32 * TILE_SIZE);
+        Self {
+            min: center - Vec2::splat(half_tile),
+            max: center + Vec2::splat(half_tile),
+        }
+    }
+}
+
+pub fn world_to_tile(position: Vec2) -> (i32, i32) {
+    let half_tile = TILE_SIZE / 2.0;
+    (
+        ((position.x + half_tile) / TILE_SIZE).floor() as i32,
+        ((position.y + half_tile) / TILE_SIZE).floor() as i32,
+    )
+}
+
+pub fn segment_first_aabb_intersection(start: Vec2, end: Vec2, aabb: Aabb) -> Option<f32> {
+    let delta = end - start;
+    let mut t_min: f32 = 0.0;
+    let mut t_max: f32 = 1.0;
+
+    for (origin, direction, min, max) in [
+        (start.x, delta.x, aabb.min.x, aabb.max.x),
+        (start.y, delta.y, aabb.min.y, aabb.max.y),
+    ] {
+        if direction.abs() <= f32::EPSILON {
+            if origin <= min || origin >= max {
+                return None;
+            }
+        } else {
+            let inv = 1.0 / direction;
+            let mut near = (min - origin) * inv;
+            let mut far = (max - origin) * inv;
+            if near > far {
+                std::mem::swap(&mut near, &mut far);
+            }
+            t_min = t_min.max(near);
+            t_max = t_max.min(far);
+            if t_min >= t_max {
+                return None;
+            }
+        }
+    }
+
+    Some(t_min.max(0.0))
+}
+
+pub fn terrain_blocks_segment(start: Vec2, end: Vec2, map: &MapData) -> bool {
+    let min = start.min(end);
+    let max = start.max(end);
+    let (min_x, min_y) = world_to_tile(min);
+    let (max_x, max_y) = world_to_tile(max);
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            if map.tile_at(x, y) != Some(TerrainTile::Floor)
+                && segment_first_aabb_intersection(start, end, Aabb::tile(x, y)).is_some()
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Shared occupancy query for movement and future teleport/enemy collision.
@@ -213,5 +280,50 @@ mod tests {
         );
 
         assert_eq!(moved, Vec2::new(0.0, TILE_SIZE));
+    }
+
+    #[test]
+    fn segment_on_floor_is_unobstructed() {
+        let map = map_with([(0, 0, TerrainTile::Floor), (1, 0, TerrainTile::Floor)]);
+
+        assert!(!terrain_blocks_segment(
+            Vec2::ZERO,
+            Vec2::new(TILE_SIZE, 0.0),
+            &map
+        ));
+    }
+
+    #[test]
+    fn wall_and_missing_tiles_obstruct_segment() {
+        let wall_map = map_with([(0, 0, TerrainTile::Floor), (1, 0, TerrainTile::Wall)]);
+        assert!(terrain_blocks_segment(
+            Vec2::ZERO,
+            Vec2::new(TILE_SIZE, 0.0),
+            &wall_map
+        ));
+
+        let sparse_map = map_with([(0, 0, TerrainTile::Floor)]);
+        assert!(terrain_blocks_segment(
+            Vec2::ZERO,
+            Vec2::new(TILE_SIZE, 0.0),
+            &sparse_map
+        ));
+    }
+
+    #[test]
+    fn segment_along_tile_boundary_does_not_enter_adjacent_wall() {
+        let map = map_with([
+            (0, 0, TerrainTile::Floor),
+            (1, 0, TerrainTile::Floor),
+            (0, 1, TerrainTile::Wall),
+            (1, 1, TerrainTile::Wall),
+        ]);
+        let boundary_y = TILE_SIZE / 2.0;
+
+        assert!(!terrain_blocks_segment(
+            Vec2::new(0.0, boundary_y),
+            Vec2::new(TILE_SIZE, boundary_y),
+            &map
+        ));
     }
 }
