@@ -1,7 +1,7 @@
 //! There is no actual game, it will just display the current
 //! settings for 5 seconds before going back to the menu.
 
-use bevy::{app::AppExit, prelude::*};
+use bevy::{app::AppExit, prelude::*, window::PrimaryWindow};
 use bevy_spritesheet_animation::prelude::*;
 use map_support::{
     collision::{self, Collider},
@@ -19,7 +19,11 @@ use crate::GameState;
 // This plugin contains the game.
 pub fn game_plugin(app: &mut App) {
     app.add_plugins(TerrainTilemapPlugin)
-        .init_resource::<CollisionDebug>();
+        .init_resource::<CollisionDebug>()
+        .init_resource::<CombatConfig>()
+        .init_resource::<SelectedAttackMode>()
+        .init_resource::<CursorWorld>()
+        .add_message::<AttackFired>();
     app.add_systems(
         OnEnter(GameState::Game),
         (setup_scene, setup_instructions, spawn_character),
@@ -28,7 +32,12 @@ pub fn game_plugin(app: &mut App) {
     .add_systems(
         Update,
         (
+            update_cursor_world_position,
+            select_attack_mode,
             control_character,
+            trigger_attack_fire_event,
+            handle_attack_animation_events,
+            update_attack_hud,
             update_camera,
             pause_game,
             toggle_collision_debug,
@@ -67,6 +76,51 @@ struct CollisionDebug {
     enabled: bool,
 }
 
+#[derive(Resource, Clone, Copy, Debug)]
+struct CombatConfig {
+    lightning_range: f32,
+}
+
+impl Default for CombatConfig {
+    fn default() -> Self {
+        Self {
+            lightning_range: 220.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttackMode {
+    Lightning,
+    Projectile,
+    Auto,
+}
+
+impl AttackMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Lightning => "Lightning",
+            Self::Projectile => "Projectile",
+            Self::Auto => "Auto",
+        }
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+struct SelectedAttackMode(AttackMode);
+
+impl Default for SelectedAttackMode {
+    fn default() -> Self {
+        Self(AttackMode::Auto)
+    }
+}
+
+#[derive(Resource, Default, Clone, Copy, Debug)]
+struct CursorWorld(Option<Vec2>);
+
+#[derive(Component)]
+struct AttackHud;
+
 #[derive(Resource)]
 struct GameInitialized;
 
@@ -83,6 +137,7 @@ const PLAYER_SHEET_HEIGHT: u32 = 768;
 const PLAYER_IDLE_FRAMES: usize = 2;
 const PLAYER_MOVE_FRAMES: usize = 4;
 const PLAYER_SHOOT_FRAMES: usize = 4;
+const PLAYER_SHOOT_FIRE_FRAME: usize = 1;
 const PLAYER_STATES_PER_DIRECTION: usize = 3;
 const PLAYER_IDLE_STATE_ROW_OFFSET: usize = 0;
 const PLAYER_MOVE_STATE_ROW_OFFSET: usize = 1;
@@ -111,10 +166,6 @@ impl PlayerAnimations {
 
     fn shoot_for(&self, facing: Facing) -> &Handle<Animation> {
         &self.shoot[facing.animation_index()]
-    }
-
-    fn is_shoot_animation(&self, handle: &Handle<Animation>) -> bool {
-        self.shoot.iter().any(|shoot| shoot == handle)
     }
 }
 
@@ -161,6 +212,14 @@ fn spawn_character(
                 .build(),
         )
     };
+    let make_shoot_animation = |animations: &mut Assets<Animation>, row| {
+        animations.add(
+            spritesheet
+                .create_animation()
+                .add_horizontal_strip(0, row, PLAYER_SHOOT_FRAMES)
+                .build(),
+        )
+    };
 
     let idle = Facing::ALL.map(|facing| {
         make_strip_animation(
@@ -177,10 +236,9 @@ fn spawn_character(
         )
     });
     let shoot = Facing::ALL.map(|facing| {
-        make_strip_animation(
+        make_shoot_animation(
             &mut animations,
             player_animation_row(facing, PLAYER_SHOOT_STATE_ROW_OFFSET),
-            PLAYER_SHOOT_FRAMES,
         )
     });
 
@@ -214,7 +272,8 @@ fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitia
     }
 
     commands.spawn((
-        Text::new("Move with WASD or arrow keys. Fire with Space"),
+        AttackHud,
+        Text::new(format_attack_hud(AttackMode::Auto)),
         Node {
             position_type: PositionType::Absolute,
             bottom: px(12),
@@ -388,6 +447,15 @@ impl Facing {
     fn animation_index(self) -> usize {
         self as usize
     }
+
+    fn unit_vector(self) -> Vec2 {
+        match self {
+            Self::Right => Vec2::X,
+            Self::Left => Vec2::NEG_X,
+            Self::Up => Vec2::Y,
+            Self::Down => Vec2::NEG_Y,
+        }
+    }
 }
 
 fn facing_from_direction(direction: Vec2, current: Facing) -> Facing {
@@ -408,9 +476,115 @@ fn facing_from_direction(direction: Vec2, current: Facing) -> Facing {
     }
 }
 
-// Component to mark that a character is currently shooting
-#[derive(Component)]
-struct Shooting;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttackKind {
+    Lightning,
+    Projectile,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+struct AttackRequest {
+    kind: AttackKind,
+    origin: Vec2,
+    target: Vec2,
+    direction: Vec2,
+}
+
+#[derive(Component, Clone, Debug)]
+struct PlayerAction {
+    request: AttackRequest,
+    animation: Handle<Animation>,
+    fired: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Message, Clone, Debug)]
+struct AttackFired {
+    entity: Entity,
+    request: AttackRequest,
+}
+
+fn resolve_attack_kind(
+    mode: AttackMode,
+    origin: Vec2,
+    target: Vec2,
+    lightning_range: f32,
+) -> AttackKind {
+    match mode {
+        AttackMode::Lightning => AttackKind::Lightning,
+        AttackMode::Projectile => AttackKind::Projectile,
+        AttackMode::Auto => {
+            if origin.distance(target) <= lightning_range {
+                AttackKind::Lightning
+            } else {
+                AttackKind::Projectile
+            }
+        }
+    }
+}
+
+fn attack_direction_and_facing(
+    origin: Vec2,
+    target: Vec2,
+    current_facing: Facing,
+) -> (Vec2, Facing) {
+    let aim = target - origin;
+    if aim == Vec2::ZERO {
+        (current_facing.unit_vector(), current_facing)
+    } else {
+        let facing = facing_from_direction(aim, current_facing);
+        (aim.normalize(), facing)
+    }
+}
+
+fn format_attack_hud(mode: AttackMode) -> String {
+    format!(
+        "Move: WASD/arrows | Fire: left click | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {} | Pause: Esc | Debug: F3",
+        mode.label()
+    )
+}
+
+fn cursor_to_world(
+    cursor_position: Option<Vec2>,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> Option<Vec2> {
+    camera
+        .viewport_to_world_2d(camera_transform, cursor_position?)
+        .ok()
+}
+
+fn update_cursor_world_position(
+    window: Single<&Window, With<PrimaryWindow>>,
+    camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mut cursor_world: ResMut<CursorWorld>,
+) {
+    let (camera, camera_transform) = *camera;
+    cursor_world.0 = cursor_to_world(window.cursor_position(), camera, camera_transform);
+}
+
+fn select_attack_mode(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut selected_mode: ResMut<SelectedAttackMode>,
+) {
+    if keyboard.just_pressed(KeyCode::Digit1) {
+        selected_mode.0 = AttackMode::Lightning;
+    } else if keyboard.just_pressed(KeyCode::Digit2) {
+        selected_mode.0 = AttackMode::Projectile;
+    } else if keyboard.just_pressed(KeyCode::Digit3) {
+        selected_mode.0 = AttackMode::Auto;
+    }
+}
+
+fn update_attack_hud(
+    selected_mode: Res<SelectedAttackMode>,
+    mut hud: Single<&mut Text, With<AttackHud>>,
+) {
+    if selected_mode.is_changed() {
+        **hud = Text::new(format_attack_hud(selected_mode.0));
+    }
+}
 
 fn move_with_collision(
     transform: &mut Transform,
@@ -431,6 +605,7 @@ fn move_with_collision(
 fn control_character(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut commands: Commands,
     character: Single<(
         Entity,
@@ -438,77 +613,139 @@ fn control_character(
         &mut Transform,
         &mut Facing,
         &PlayerCollider,
-        Option<&Shooting>,
+        Option<&PlayerAction>,
     )>,
     game_map: Res<GameMap>,
     my_animations: Res<PlayerAnimations>,
-    mut messages: MessageReader<AnimationEvent>,
+    selected_mode: Res<SelectedAttackMode>,
+    combat_config: Res<CombatConfig>,
+    cursor_world: Res<CursorWorld>,
 ) {
-    // Control the character with the keyboard
-
-    let (entity, mut animation, mut transform, mut facing, collider, shooting) =
+    let (entity, mut animation, mut transform, mut facing, collider, action) =
         character.into_inner();
 
-    // If they're shooting, do nothing and wait for the animation to end
+    if action.is_some() {
+        return;
+    }
 
-    if shooting.is_none() {
-        // Shoot with the spacebar
-        if keyboard.pressed(KeyCode::Space) {
-            // Set the animation
+    if mouse.just_pressed(MouseButton::Left)
+        && let Some(target) = cursor_world.0
+    {
+        let origin = transform.translation.xy();
+        let (direction, aim_facing) = attack_direction_and_facing(origin, target, *facing);
+        *facing = aim_facing;
 
-            animation.switch(my_animations.shoot_for(*facing).clone());
+        let shoot_animation = my_animations.shoot_for(*facing).clone();
+        animation.switch(shoot_animation.clone());
 
-            // Add a Shooting component
+        commands.entity(entity).insert(PlayerAction {
+            request: AttackRequest {
+                kind: resolve_attack_kind(
+                    selected_mode.0,
+                    origin,
+                    target,
+                    combat_config.lightning_range,
+                ),
+                origin,
+                target,
+                direction,
+            },
+            animation: shoot_animation,
+            fired: false,
+        });
+        return;
+    }
 
-            commands.entity(entity).insert(Shooting);
-        } else {
-            let mut direction = Vec2::ZERO;
+    let mut direction = Vec2::ZERO;
 
-            if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
-                direction.y += 1.;
+    if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
+        direction.y += 1.;
+    }
+    if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
+        direction.y -= 1.;
+    }
+    if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
+        direction.x -= 1.;
+    }
+    if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
+        direction.x += 1.;
+    }
+
+    if direction != Vec2::ZERO {
+        *facing = facing_from_direction(direction, *facing);
+
+        let movement_animation = my_animations.movement_for(*facing);
+        if animation.animation != *movement_animation {
+            animation.switch(movement_animation.clone());
+        }
+
+        let move_delta = direction.normalize() * PLAYER_SPEED * time.delta_secs();
+        move_with_collision(&mut transform, collider, move_delta, &game_map.0);
+    } else {
+        let idle_animation = my_animations.idle_for(*facing);
+        if animation.animation != *idle_animation {
+            animation.switch(idle_animation.clone());
+        }
+    }
+}
+
+fn trigger_attack_fire_event(
+    character: Single<(Entity, &SpritesheetAnimation, Option<&mut PlayerAction>)>,
+    mut attack_fired: MessageWriter<AttackFired>,
+) {
+    let (entity, sprite_animation, action) = character.into_inner();
+    let Some(mut action) = action else {
+        return;
+    };
+
+    if !action.fired
+        && sprite_animation.animation == action.animation
+        && sprite_animation.progress.frame >= PLAYER_SHOOT_FIRE_FRAME
+    {
+        attack_fired.write(AttackFired {
+            entity,
+            request: action.request.clone(),
+        });
+        action.fired = true;
+    }
+}
+
+fn handle_attack_animation_events(
+    mut commands: Commands,
+    character: Single<(
+        Entity,
+        &mut SpritesheetAnimation,
+        &Facing,
+        Option<&PlayerAction>,
+    )>,
+    my_animations: Res<PlayerAnimations>,
+    mut animation_events: MessageReader<AnimationEvent>,
+) {
+    let (player_entity, mut sprite_animation, facing, action) = character.into_inner();
+    let Some(action) = action else {
+        return;
+    };
+
+    let mut finished = false;
+    for event in animation_events.read() {
+        match event {
+            AnimationEvent::AnimationRepetitionEnd {
+                entity, animation, ..
+            } if *entity == player_entity && *animation == action.animation => {
+                finished = true;
             }
-            if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
-                direction.y -= 1.;
+            AnimationEvent::AnimationEnd { entity, animation }
+                if *entity == player_entity && *animation == action.animation =>
+            {
+                finished = true;
             }
-            if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
-                direction.x -= 1.;
-            }
-            if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
-                direction.x += 1.;
-            }
-
-            if direction != Vec2::ZERO {
-                *facing = facing_from_direction(direction, *facing);
-
-                let movement_animation = my_animations.movement_for(*facing);
-                if animation.animation != *movement_animation {
-                    animation.switch(movement_animation.clone());
-                }
-
-                let move_delta = direction.normalize() * PLAYER_SPEED * time.delta_secs();
-                move_with_collision(&mut transform, collider, move_delta, &game_map.0);
-            } else {
-                let idle_animation = my_animations.idle_for(*facing);
-                if animation.animation != *idle_animation {
-                    animation.switch(idle_animation.clone());
-                }
-            }
+            _ => {}
         }
     }
 
-    // Remove the Shooting component when the shooting animation ends
-    //
-    // We use animation events to detect when this happens.
-    // Check out the `events` examples for more details.
-
-    for event in messages.read() {
-        if let AnimationEvent::AnimationRepetitionEnd {
-            entity, animation, ..
-        } = event
-            && my_animations.is_shoot_animation(animation)
-        {
-            commands.entity(*entity).remove::<Shooting>();
-        }
+    if finished {
+        commands.entity(player_entity).remove::<PlayerAction>();
+        sprite_animation.switch(my_animations.idle_for(*facing).clone());
     }
 }
 
@@ -556,6 +793,74 @@ mod tests {
     }
 
     #[test]
+    fn aim_direction_selects_all_four_facings() {
+        assert_eq!(
+            attack_direction_and_facing(Vec2::ZERO, Vec2::X, Facing::Left).1,
+            Facing::Right
+        );
+        assert_eq!(
+            attack_direction_and_facing(Vec2::ZERO, Vec2::NEG_X, Facing::Right).1,
+            Facing::Left
+        );
+        assert_eq!(
+            attack_direction_and_facing(Vec2::ZERO, Vec2::Y, Facing::Down).1,
+            Facing::Up
+        );
+        assert_eq!(
+            attack_direction_and_facing(Vec2::ZERO, Vec2::NEG_Y, Facing::Up).1,
+            Facing::Down
+        );
+    }
+
+    #[test]
+    fn zero_length_aim_retains_facing_and_uses_facing_unit_vector() {
+        for facing in Facing::ALL {
+            let (direction, resolved_facing) =
+                attack_direction_and_facing(Vec2::ZERO, Vec2::ZERO, facing);
+            assert_eq!(resolved_facing, facing);
+            assert_eq!(direction, facing.unit_vector());
+        }
+    }
+
+    #[test]
+    fn auto_attack_selects_lightning_at_or_inside_range() {
+        assert_eq!(
+            resolve_attack_kind(AttackMode::Auto, Vec2::ZERO, Vec2::new(219.9, 0.0), 220.0),
+            AttackKind::Lightning
+        );
+        assert_eq!(
+            resolve_attack_kind(AttackMode::Auto, Vec2::ZERO, Vec2::new(220.0, 0.0), 220.0),
+            AttackKind::Lightning
+        );
+        assert_eq!(
+            resolve_attack_kind(AttackMode::Auto, Vec2::ZERO, Vec2::new(220.1, 0.0), 220.0),
+            AttackKind::Projectile
+        );
+    }
+
+    #[test]
+    fn manual_attack_modes_select_requested_kind() {
+        assert_eq!(
+            resolve_attack_kind(
+                AttackMode::Lightning,
+                Vec2::ZERO,
+                Vec2::new(999.0, 0.0),
+                220.0
+            ),
+            AttackKind::Lightning
+        );
+        assert_eq!(
+            resolve_attack_kind(
+                AttackMode::Projectile,
+                Vec2::ZERO,
+                Vec2::new(1.0, 0.0),
+                220.0
+            ),
+            AttackKind::Projectile
+        );
+    }
+
+    #[test]
     fn player_sheet_layout_constants_match_documented_dimensions() {
         assert_eq!(PLAYER_SHEET_COLUMNS * 64, PLAYER_SHEET_WIDTH as usize);
         assert_eq!(PLAYER_SHEET_ROWS * 64, PLAYER_SHEET_HEIGHT as usize);
@@ -587,6 +892,138 @@ mod tests {
         assert_eq!(
             player_animation_row(Facing::Down, PLAYER_SHOOT_STATE_ROW_OFFSET),
             11
+        );
+    }
+
+    #[derive(Resource, Default)]
+    struct FireCount(usize);
+
+    fn count_attack_fired(mut messages: MessageReader<AttackFired>, mut count: ResMut<FireCount>) {
+        count.0 += messages.read().count();
+    }
+
+    fn flat_test_map() -> map::MapData {
+        map::MapData {
+            tiles: (-1..=1)
+                .flat_map(|y| {
+                    (-1..=1).map(move |x| map::MapTile {
+                        x,
+                        y,
+                        tile: map::TerrainTile::Floor,
+                    })
+                })
+                .collect(),
+            entities: Vec::new(),
+        }
+    }
+
+    fn test_player_animations() -> PlayerAnimations {
+        PlayerAnimations {
+            idle: Facing::ALL.map(|_| Handle::default()),
+            movement: Facing::ALL.map(|_| Handle::default()),
+            shoot: Facing::ALL.map(|_| Handle::default()),
+        }
+    }
+
+    #[test]
+    fn click_creates_one_fire_event_and_locks_movement_until_animation_completion() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<AnimationEvent>()
+            .add_message::<AttackFired>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(GameMap(flat_test_map()))
+            .insert_resource(test_player_animations())
+            .insert_resource(SelectedAttackMode(AttackMode::Auto))
+            .insert_resource(CombatConfig::default())
+            .insert_resource(CursorWorld(Some(Vec2::new(10.0, 0.0))))
+            .init_resource::<FireCount>()
+            .add_systems(
+                Update,
+                (
+                    control_character,
+                    trigger_attack_fire_event,
+                    count_attack_fired,
+                    handle_attack_animation_events,
+                )
+                    .chain(),
+            );
+
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
+                Facing::Right,
+                SpritesheetAnimation::new(Handle::default()),
+                Transform::from_xyz(0.0, 0.0, 2.0),
+            ))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear_just_pressed(MouseButton::Left);
+
+        assert!(app.world().entity(player).contains::<PlayerAction>());
+        assert_eq!(app.world().resource::<FireCount>().0, 0);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(player)
+                .get::<Transform>()
+                .unwrap()
+                .translation
+                .y,
+            0.0
+        );
+
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<SpritesheetAnimation>()
+            .unwrap()
+            .progress
+            .frame = PLAYER_SHOOT_FIRE_FRAME;
+        app.update();
+        assert_eq!(app.world().resource::<FireCount>().0, 1);
+
+        app.update();
+        assert_eq!(app.world().resource::<FireCount>().0, 1);
+
+        let attack_animation = app
+            .world()
+            .entity(player)
+            .get::<PlayerAction>()
+            .unwrap()
+            .animation
+            .clone();
+        app.world_mut()
+            .resource_mut::<Messages<AnimationEvent>>()
+            .write(AnimationEvent::AnimationRepetitionEnd {
+                entity: player,
+                animation: attack_animation,
+                animation_repetition: 0,
+            });
+        app.update();
+        assert!(!app.world().entity(player).contains::<PlayerAction>());
+
+        app.update();
+        assert!(
+            app.world()
+                .entity(player)
+                .get::<Transform>()
+                .unwrap()
+                .translation
+                .y
+                > 0.0
         );
     }
 }

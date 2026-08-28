@@ -141,16 +141,16 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Turn toward world-space clicks and play exactly one directional firing animation while movement is locked.
 
-- [ ] Add one cursor-to-world helper/system using `Camera::viewport_to_world_2d`. Return `None` safely when the cursor is absent or conversion fails.
-- [ ] Add `AttackMode::{Lightning, Projectile, Auto}` and game bindings `1`, `2`, `3`; default to `Auto`.
-- [ ] Add a small HUD line showing selected mode and controls.
-- [ ] On `MouseButton::Left.just_pressed`, capture the world target once. Do not continuously retarget while the button is held.
-- [ ] Resolve auto mode from player-to-target distance and configured lightning range.
-- [ ] For a valid request, set four-way facing from the aim vector, switch to the matching shoot animation, and enter an explicit player action/state component that locks movement.
-- [ ] Do not overload a bare `Shooting` marker with all behavior. Store attack kind and immutable origin/target/direction needed by the later payload system.
-- [ ] Complete the action on the matching animation-end event and return to idle or current movement on the next frame. Ignore additional left clicks while busy.
-- [ ] Define zero-length aim deterministically (retain current facing and use that facing's unit vector).
-- [ ] Add an `AttackFired` message/event seam. Initially it may only record that the configured firing frame/event was reached; later steps consume it to create lightning/projectiles. Trigger payload once per click, not once per animation loop.
+- [x] Add one cursor-to-world helper/system using `Camera::viewport_to_world_2d`. Return `None` safely when the cursor is absent or conversion fails.
+- [x] Add `AttackMode::{Lightning, Projectile, Auto}` and game bindings `1`, `2`, `3`; default to `Auto`.
+- [x] Add a small HUD line showing selected mode and controls.
+- [x] On `MouseButton::Left.just_pressed`, capture the world target once. Do not continuously retarget while the button is held.
+- [x] Resolve auto mode from player-to-target distance and configured lightning range.
+- [x] For a valid request, set four-way facing from the aim vector, switch to the matching shoot animation, and enter an explicit player action/state component that locks movement.
+- [x] Do not overload a bare `Shooting` marker with all behavior. Store attack kind and immutable origin/target/direction needed by the later payload system.
+- [x] Complete the action on the matching animation-end event and return to idle or current movement on the next frame. Ignore additional left clicks while busy.
+- [x] Define zero-length aim deterministically (retain current facing and use that facing's unit vector).
+- [x] Add an `AttackFired` message/event seam. Initially it may only record that the configured firing frame/event was reached; later steps consume it to create lightning/projectiles. Trigger payload once per click, not once per animation loop.
 
 **Automated acceptance:** Pure tests cover all four aim facings, auto selection at just below/equal/above range, zero-length aim, and manual mode selection. A minimal ECS test proves one click/request creates one fire event and movement remains locked until completion.
 
@@ -312,3 +312,4 @@ Add one short entry per completed step, for example:
 - `Step 1 — 2026-08-27`: Added serializable map entity placements with an extensible `MapEntityKind::Enemy`, default-compatible `entities`, entity placement/removal helpers, tests for compatibility/round-trip/idempotency/layer independence, and two floor-tile enemy records in `assets/maps/initial.ron`. Files changed: `src/map.rs`, `src/collision.rs`, `assets/maps/initial.ron`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Targeted map tests passed. Manual game/editor smoke not run.
 - `Step 2 — 2026-08-28`: Added map editor enemy entity palette mode on key `3`, placeholder enemy markers, enemy-only placement/removal behavior with explicit-floor validation, marker redraw on map repaint, and pure helper/tests for entity placement validity. Files changed: `src/bin/map_editor.rs`, `src/map.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual editor smoke not run.
 - `Step 3 — 2026-08-28`: Added a stdlib-only placeholder sprite generator, checked in fixed-layout player/enemy PNG sheets, documented replacement/layout details, and switched player animation setup to named four-way idle/move/shoot layout constants with dominant-axis facing tests. Files changed: `tools/generate_placeholder_sprites.py`, `assets/sprites/character_placeholder.png`, `assets/sprites/enemy_placeholder.png`, `assets/sprites/PLACEHOLDERS.md`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual movement smoke not run.
+- `Step 4 — 2026-08-28`: Added cursor-to-world aim capture, attack mode selection/HUD, `CombatConfig` lightning range, explicit player attack action state with immutable request data, firing-frame `AttackFired` message seam, and animation-end action completion with movement lock tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual click/facing/movement-lock smoke not run.
