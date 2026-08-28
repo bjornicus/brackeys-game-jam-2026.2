@@ -192,13 +192,13 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Add test enemies that chase, stop at attack distance, collide with terrain, and can be stunned/damaged.
 
-- [ ] Spawn an enemy for every enemy placement after map setup, at tile-center world coordinates.
-- [ ] Attach the generated placeholder sprite/animations, feet movement collider, full-sprite combat hitbox, health, movement speed, attack distance, and an enemy/faction marker.
-- [ ] Chase the player only while distance is greater than `attack_distance`. Stop based on distance, not player/entity collision.
-- [ ] Resolve enemy movement against terrain with the same shared axis-separated occupancy helper used by the player. Do not make players or enemies dynamic movement blockers.
-- [ ] Use a deterministic fallback when direct diagonal pursuit is terrain-blocked (axis-separated sliding is sufficient; pathfinding is out of scope).
-- [ ] Add enemy collider/hitbox visualization to F3 debug drawing using distinct colors.
-- [ ] Keep health mutation in the generic damage pipeline rather than directly in lightning/projectile systems.
+- [x] Spawn an enemy for every enemy placement after map setup, at tile-center world coordinates.
+- [x] Attach the generated placeholder sprite/animations, feet movement collider, full-sprite combat hitbox, health, movement speed, attack distance, and an enemy/faction marker.
+- [x] Chase the player only while distance is greater than `attack_distance`. Stop based on distance, not player/entity collision.
+- [x] Resolve enemy movement against terrain with the same shared axis-separated occupancy helper used by the player. Do not make players or enemies dynamic movement blockers.
+- [x] Use a deterministic fallback when direct diagonal pursuit is terrain-blocked (axis-separated sliding is sufficient; pathfinding is out of scope).
+- [x] Add enemy collider/hitbox visualization to F3 debug drawing using distinct colors.
+- [x] Keep health mutation in the generic damage pipeline rather than directly in lightning/projectile systems.
 
 **Automated acceptance:** Headless tests prove spawn count/positions match map data, enemies approach outside attack distance, stop at/inside it, do not cross walls, and lose the expected health from damage events.
 
@@ -315,3 +315,4 @@ Add one short entry per completed step, for example:
 - `Step 4 — 2026-08-28`: Added cursor-to-world aim capture, attack mode selection/HUD, `CombatConfig` lightning range, explicit player attack action state with immutable request data, firing-frame `AttackFired` message seam, and animation-end action completion with movement lock tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual click/facing/movement-lock smoke not run.
 - `Step 5 — 2026-08-28`: Added lightning range/rejection gizmo feedback, terrain segment obstruction checks, pre-animation lightning validation, short-lived jagged lightning visuals, generic `Hitbox`/`Health`/`Damage` plumbing, deterministic nearest-hit lightning damage, and tests for obstruction/range/hit ordering/damage-once behavior. Files changed: `src/collision.rs`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual lightning range/valid/rejected-cast smoke not run.
 - `Step 6 — 2026-08-28`: Added placeholder projectile spawning from projectile fire events, swept circle/AABB movement against terrain and hitboxes, earliest-impact resolution, owner/same-faction filtering, damage/despawn behavior, lifetime cleanup, and projectile coverage tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game projectile`, `cargo test`, and `cargo check --all-targets` passed. Manual projectile smoke not run.
+- `Step 7 — 2026-08-28`: Spawned map-placed placeholder enemies with shared terrain movement, chase/attack-distance behavior, generic combat health/hitboxes, and F3 collider/hitbox visualization. Added headless spawn, movement, and damage tests. Fixed enemy/player query disjointness and filtered attack animation systems explicitly to the player so animated enemies cannot make their `Single` queries ambiguous. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game enemy`, `cargo test`, and `cargo check --all-targets` passed. Manual enemy spawn/chase/collision/attack smoke not run.

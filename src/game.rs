@@ -24,7 +24,9 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<SelectedAttackMode>()
         .init_resource::<CursorWorld>()
         .init_resource::<AttackFeedback>()
+        .init_resource::<EnemiesSpawned>()
         .add_message::<AttackFired>()
+        .add_systems(PreStartup, setup_enemy_animations)
         .add_message::<Damage>();
     app.add_systems(
         OnEnter(GameState::Game),
@@ -58,6 +60,12 @@ pub fn game_plugin(app: &mut App) {
     )
     .add_systems(
         Update,
+        (spawn_enemies_from_map, attach_enemy_sprites, update_enemies)
+            .chain()
+            .run_if(in_state(GameState::Game)),
+    )
+    .add_systems(
+        Update,
         (pause_menu_action, pause_menu_button_system).run_if(in_state(GameState::Paused)),
     );
 }
@@ -78,6 +86,38 @@ struct Player;
 #[derive(Component, Clone, Copy)]
 struct PlayerCollider(Collider);
 
+const ENEMY_COLLIDER_SIZE: Vec2 = Vec2::new(40.0, 20.0);
+const ENEMY_COLLIDER_OFFSET: Vec2 = Vec2::new(0.0, -24.0);
+const ENEMY_HITBOX_SIZE: Vec2 = Vec2::new(64.0, 80.0);
+const ENEMY_SHEET_COLUMNS: usize = 4;
+const ENEMY_SHEET_ROWS: usize = 4;
+const ENEMY_SHEET_WIDTH: u32 = 256;
+const ENEMY_SHEET_HEIGHT: u32 = 256;
+const ENEMY_IDLE_ROW: usize = 0;
+const ENEMY_MOVE_ROW: usize = 1;
+const ENEMY_ANIMATION_FRAMES: usize = 4;
+
+#[derive(Component)]
+struct Enemy;
+
+#[derive(Component, Clone, Copy)]
+struct EnemyCollider(Collider);
+
+#[derive(Component, Clone, Copy)]
+struct EnemyMovement {
+    speed: f32,
+    attack_distance: f32,
+}
+
+#[derive(Resource, Default)]
+struct EnemiesSpawned(bool);
+
+#[derive(Resource)]
+struct EnemyAnimations {
+    idle: Handle<Animation>,
+    movement: Handle<Animation>,
+}
+
 #[derive(Resource)]
 struct GameMap(map::MapData);
 
@@ -95,6 +135,9 @@ struct CombatConfig {
     projectile_damage: f32,
     projectile_collision_radius: f32,
     projectile_maximum_lifetime: f32,
+    enemy_maximum_health: f32,
+    enemy_speed: f32,
+    enemy_attack_distance: f32,
 }
 
 impl Default for CombatConfig {
@@ -107,6 +150,9 @@ impl Default for CombatConfig {
             projectile_damage: 30.0,
             projectile_collision_radius: 6.0,
             projectile_maximum_lifetime: 3.0,
+            enemy_maximum_health: 100.0,
+            enemy_speed: 55.0,
+            enemy_attack_distance: 64.0,
         }
     }
 }
@@ -250,6 +296,27 @@ impl PlayerAnimations {
     }
 }
 
+fn setup_enemy_animations(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut animations: ResMut<Assets<Animation>>,
+) {
+    let image = assets.load("sprites/enemy_placeholder.png");
+    let sheet = Spritesheet::new(&image, ENEMY_SHEET_COLUMNS, ENEMY_SHEET_ROWS);
+    let make_animation = |animations: &mut Assets<Animation>, row| {
+        animations.add(
+            sheet
+                .create_animation()
+                .add_horizontal_strip(0, row, ENEMY_ANIMATION_FRAMES)
+                .build(),
+        )
+    };
+    commands.insert_resource(EnemyAnimations {
+        idle: make_animation(&mut animations, ENEMY_IDLE_ROW),
+        movement: make_animation(&mut animations, ENEMY_MOVE_ROW),
+    });
+}
+
 fn setup_scene(
     mut commands: Commands,
     terrain_atlas: Res<TerrainAtlas>,
@@ -348,6 +415,130 @@ fn spawn_character(
     ));
 }
 
+fn enemy_spawn_position(entity: map::MapEntity) -> Vec2 {
+    Vec2::new(
+        entity.x as f32 * map::TILE_SIZE,
+        entity.y as f32 * map::TILE_SIZE,
+    )
+}
+
+fn spawn_enemies_from_map(
+    mut commands: Commands,
+    game_map: Option<Res<GameMap>>,
+    animations: Option<Res<EnemyAnimations>>,
+    combat_config: Res<CombatConfig>,
+    mut spawned: ResMut<EnemiesSpawned>,
+) {
+    if spawned.0 {
+        return;
+    }
+    let (Some(game_map), Some(animations)) = (game_map, animations) else {
+        return;
+    };
+
+    for placement in &game_map.0.entities {
+        if placement.kind != map::MapEntityKind::Enemy {
+            continue;
+        }
+        commands.spawn((
+            Enemy,
+            Faction::Enemy,
+            Facing::Down,
+            EnemyCollider(Collider::new(ENEMY_COLLIDER_SIZE, ENEMY_COLLIDER_OFFSET)),
+            Hitbox(Collider::new(ENEMY_HITBOX_SIZE, Vec2::ZERO)),
+            Health {
+                current: combat_config.enemy_maximum_health,
+                max: combat_config.enemy_maximum_health,
+            },
+            EnemyMovement {
+                speed: combat_config.enemy_speed,
+                attack_distance: combat_config.enemy_attack_distance,
+            },
+            SpritesheetAnimation::new(animations.idle.clone()),
+            Transform::from_translation(enemy_spawn_position(*placement).extend(2.0)),
+        ));
+    }
+    spawned.0 = true;
+}
+
+fn attach_enemy_sprites(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+    enemies: Query<Entity, Added<Enemy>>,
+) {
+    let image = assets.load("sprites/enemy_placeholder.png");
+    let sheet = Spritesheet::new(&image, ENEMY_SHEET_COLUMNS, ENEMY_SHEET_ROWS);
+    for enemy in &enemies {
+        commands.entity(enemy).insert(
+            sheet
+                .with_size_hint(ENEMY_SHEET_WIDTH, ENEMY_SHEET_HEIGHT)
+                .sprite(&mut atlas_layouts),
+        );
+    }
+}
+
+fn enemy_chase_position(
+    enemy_position: Vec2,
+    player_position: Vec2,
+    movement: EnemyMovement,
+    collider: Collider,
+    delta_secs: f32,
+    occupancy: &collision::Occupancy<'_>,
+) -> Vec2 {
+    let direction = player_position - enemy_position;
+    if direction.length() <= movement.attack_distance {
+        enemy_position
+    } else {
+        collision::move_axis_separated(
+            enemy_position,
+            direction.normalize_or_zero() * movement.speed * delta_secs,
+            collider,
+            occupancy,
+        )
+    }
+}
+
+fn update_enemies(
+    time: Res<Time>,
+    game_map: Res<GameMap>,
+    animations: Res<EnemyAnimations>,
+    player: Single<&Transform, With<Player>>,
+    mut enemies: Query<
+        (
+            &mut Transform,
+            &mut Facing,
+            &EnemyCollider,
+            &EnemyMovement,
+            &mut SpritesheetAnimation,
+        ),
+        (With<Enemy>, Without<Player>),
+    >,
+) {
+    let occupancy = collision::Occupancy::terrain_only(&game_map.0);
+    let player_position = player.translation.xy();
+    for (mut transform, mut facing, collider, movement, mut animation) in &mut enemies {
+        let direction = player_position - transform.translation.xy();
+        let next_position = enemy_chase_position(
+            transform.translation.xy(),
+            player_position,
+            *movement,
+            collider.0,
+            time.delta_secs(),
+            &occupancy,
+        );
+        if next_position != transform.translation.xy() {
+            *facing = facing_from_direction(direction, *facing);
+            if animation.animation != animations.movement {
+                animation.switch(animations.movement.clone());
+            }
+            transform.translation = next_position.extend(transform.translation.z);
+        } else if animation.animation != animations.idle {
+            animation.switch(animations.idle.clone());
+        }
+    }
+}
+
 fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitialized>>) {
     if initialized.is_some() {
         return;
@@ -383,6 +574,7 @@ fn toggle_collision_debug(
 fn draw_collision_debug(
     collision_debug: Res<CollisionDebug>,
     player: Single<(&Transform, &PlayerCollider), With<Player>>,
+    enemies: Query<(&Transform, &EnemyCollider, &Hitbox), With<Enemy>>,
     mut gizmos: Gizmos,
 ) {
     if collision_debug.enabled {
@@ -392,6 +584,18 @@ fn draw_collision_debug(
             collider.0.size,
             Color::srgb(1.0, 0.0, 1.0),
         );
+        for (transform, collider, hitbox) in &enemies {
+            gizmos.rect_2d(
+                transform.translation.xy() + collider.0.offset,
+                collider.0.size,
+                Color::srgb(1.0, 0.8, 0.1),
+            );
+            gizmos.rect_2d(
+                transform.translation.xy() + hitbox.0.offset,
+                hitbox.0.size,
+                Color::srgb(1.0, 0.2, 0.2),
+            );
+        }
     }
 }
 
@@ -893,7 +1097,7 @@ fn control_character(
 }
 
 fn trigger_attack_fire_event(
-    character: Single<(Entity, &SpritesheetAnimation, Option<&mut PlayerAction>)>,
+    character: Single<(Entity, &SpritesheetAnimation, Option<&mut PlayerAction>), With<Player>>,
     mut attack_fired: MessageWriter<AttackFired>,
 ) {
     let (entity, sprite_animation, action) = character.into_inner();
@@ -1122,12 +1326,15 @@ fn draw_lightning_visuals(mut gizmos: Gizmos, visuals: Query<&LightningVisual>) 
 
 fn handle_attack_animation_events(
     mut commands: Commands,
-    character: Single<(
-        Entity,
-        &mut SpritesheetAnimation,
-        &Facing,
-        Option<&PlayerAction>,
-    )>,
+    character: Single<
+        (
+            Entity,
+            &mut SpritesheetAnimation,
+            &Facing,
+            Option<&PlayerAction>,
+        ),
+        With<Player>,
+    >,
     my_animations: Res<PlayerAnimations>,
     mut animation_events: MessageReader<AnimationEvent>,
 ) {
@@ -1779,6 +1986,151 @@ mod tests {
     }
 
     #[test]
+    fn enemy_spawns_at_each_map_placement_tile_center() {
+        let mut map = floor_rect(0..=2, 0..=0);
+        map.place_entity(0, 0, map::MapEntityKind::Enemy);
+        map.place_entity(2, 0, map::MapEntityKind::Enemy);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(GameMap(map))
+            .insert_resource(CombatConfig::default())
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+            })
+            .init_resource::<EnemiesSpawned>()
+            .add_systems(Update, spawn_enemies_from_map);
+
+        app.update();
+        let mut positions: Vec<_> = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Enemy>>()
+            .iter(app.world())
+            .map(|transform| transform.translation.xy())
+            .collect();
+        positions.sort_by(|a, b| a.x.total_cmp(&b.x));
+        assert_eq!(positions, vec![Vec2::ZERO, Vec2::new(192.0, 0.0)]);
+    }
+
+    #[test]
+    fn enemy_chase_stops_at_attack_distance_and_slides_against_walls() {
+        let movement = EnemyMovement {
+            speed: 55.0,
+            attack_distance: 64.0,
+        };
+        let collider = Collider::new(ENEMY_COLLIDER_SIZE, ENEMY_COLLIDER_OFFSET);
+        let open_map = floor_rect(-1..=2, -1..=1);
+        let open_occupancy = collision::Occupancy::terrain_only(&open_map);
+        let approached = enemy_chase_position(
+            Vec2::ZERO,
+            Vec2::new(96.0, 0.0),
+            movement,
+            collider,
+            1.0,
+            &open_occupancy,
+        );
+        assert_eq!(approached, Vec2::new(55.0, 0.0));
+        assert_eq!(
+            enemy_chase_position(
+                approached,
+                Vec2::new(96.0, 0.0),
+                movement,
+                collider,
+                1.0,
+                &open_occupancy,
+            ),
+            approached
+        );
+
+        let mut wall_map = floor_rect(-1..=2, -1..=1);
+        wall_map.set(1, 0, map::TerrainTile::Wall);
+        let wall_occupancy = collision::Occupancy::terrain_only(&wall_map);
+        assert_eq!(
+            enemy_chase_position(
+                Vec2::ZERO,
+                Vec2::new(192.0, 0.0),
+                movement,
+                collider,
+                2.0,
+                &wall_occupancy,
+            ),
+            Vec2::ZERO
+        );
+    }
+
+    #[test]
+    fn enemy_update_system_moves_a_spawned_enemy_without_query_conflicts() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(GameMap(floor_rect(-1..=2, -1..=1)))
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+            })
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.1),
+            ))
+            .add_systems(Update, update_enemies);
+        app.world_mut()
+            .spawn((Player, Transform::from_xyz(96.0, 0.0, 0.0)));
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Facing::Down,
+                EnemyCollider(Collider::new(ENEMY_COLLIDER_SIZE, ENEMY_COLLIDER_OFFSET)),
+                EnemyMovement {
+                    speed: 55.0,
+                    attack_distance: 64.0,
+                },
+                SpritesheetAnimation::new(Handle::default()),
+                Transform::default(),
+            ))
+            .id();
+
+        app.update();
+        app.update();
+        assert!(
+            app.world()
+                .entity(enemy)
+                .get::<Transform>()
+                .unwrap()
+                .translation
+                .x
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn enemy_health_uses_the_generic_damage_pipeline() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<Damage>()
+            .add_systems(Update, apply_damage);
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<Messages<Damage>>()
+            .write(Damage {
+                target: enemy,
+                amount: 40.0,
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(enemy).get::<Health>().unwrap().current,
+            60.0
+        );
+    }
+
+    #[test]
     fn click_creates_one_fire_event_and_locks_movement_until_animation_completion() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -1814,6 +2166,13 @@ mod tests {
                 Transform::from_xyz(0.0, 0.0, 2.0),
             ))
             .id();
+        // Enemy animations must not make player-only Single queries ambiguous.
+        app.world_mut().spawn((
+            Enemy,
+            Facing::Left,
+            SpritesheetAnimation::new(Handle::default()),
+            Transform::from_xyz(100.0, 0.0, 2.0),
+        ));
 
         app.world_mut()
             .resource_mut::<ButtonInput<MouseButton>>()
