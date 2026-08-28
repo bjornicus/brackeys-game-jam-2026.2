@@ -208,12 +208,12 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Make combat outcomes clearly visible and state transitions robust.
 
-- [ ] Spawn a world-space health bar as enemy child entities with a fixed background and foreground fill.
-- [ ] Update fill from clamped `current / max`, hide or remove it during death, and ensure parent scaling/animation does not accidentally distort layout beyond intent.
-- [ ] Add a timed `Stunned` state. While stunned, enemy AI/movement is disabled and the stunned animation/visual is active. Reapplying stun should use one documented policy; default to resetting duration to the full configured duration.
-- [ ] Define animation/state priority: `Dying` > `Stunned` > moving/idle.
-- [ ] When health reaches zero or below, enter `Dying` once, disable movement/hitbox/damage reception, play the placeholder death animation once, then recursively despawn the enemy and health bar.
-- [ ] Avoid despawning immediately on damage so the death animation is observable.
+- [x] Spawn a world-space health bar as enemy child entities with a fixed background and foreground fill.
+- [x] Update fill from clamped `current / max`, hide or remove it during death, and ensure parent scaling/animation does not accidentally distort layout beyond intent.
+- [x] Add a timed `Stunned` state. While stunned, enemy AI/movement is disabled and the stunned animation/visual is active. Reapplying stun should use one documented policy; default to resetting duration to the full configured duration.
+- [x] Define animation/state priority: `Dying` > `Stunned` > moving/idle.
+- [x] When health reaches zero or below, enter `Dying` once, disable movement/hitbox/damage reception, play the placeholder death animation once, then recursively despawn the enemy and health bar.
+- [x] Avoid despawning immediately on damage so the death animation is observable.
 
 **Automated acceptance:** Tests cover health-bar ratio clamping, stun duration/reset, no movement while stunned, one-way transition to dying, no post-mortem damage, and despawn only after death completion.
 
@@ -316,3 +316,4 @@ Add one short entry per completed step, for example:
 - `Step 5 — 2026-08-28`: Added lightning range/rejection gizmo feedback, terrain segment obstruction checks, pre-animation lightning validation, short-lived jagged lightning visuals, generic `Hitbox`/`Health`/`Damage` plumbing, deterministic nearest-hit lightning damage, and tests for obstruction/range/hit ordering/damage-once behavior. Files changed: `src/collision.rs`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual lightning range/valid/rejected-cast smoke not run.
 - `Step 6 — 2026-08-28`: Added placeholder projectile spawning from projectile fire events, swept circle/AABB movement against terrain and hitboxes, earliest-impact resolution, owner/same-faction filtering, damage/despawn behavior, lifetime cleanup, and projectile coverage tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game projectile`, `cargo test`, and `cargo check --all-targets` passed. Manual projectile smoke not run.
 - `Step 7 — 2026-08-28`: Spawned map-placed placeholder enemies with shared terrain movement, chase/attack-distance behavior, generic combat health/hitboxes, and F3 collider/hitbox visualization. Added headless spawn, movement, and damage tests. Fixed enemy/player query disjointness and filtered attack animation systems explicitly to the player so animated enemies cannot make their `Single` queries ambiguous. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game enemy`, `cargo test`, and `cargo check --all-targets` passed. Manual enemy spawn/chase/collision/attack smoke not run.
+- `Step 8 — 2026-08-28`: Added child-sprite enemy health bars with clamped fills, timed reset-on-reapply stun state, state-priority animation selection, and deferred dying/death-animation cleanup that removes combat/movement components and recursively despawns bars. Added headless coverage for health ratios, stunned movement, and death transitions. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual health-bar/stun/death smoke not run.

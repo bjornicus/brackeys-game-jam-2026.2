@@ -60,7 +60,16 @@ pub fn game_plugin(app: &mut App) {
     )
     .add_systems(
         Update,
-        (spawn_enemies_from_map, attach_enemy_sprites, update_enemies)
+        (
+            spawn_enemies_from_map,
+            attach_enemy_sprites,
+            spawn_enemy_health_bars,
+            tick_stunned_enemies,
+            update_enemies,
+            begin_enemy_deaths,
+            finish_enemy_deaths,
+            update_enemy_health_bars,
+        )
             .chain()
             .run_if(in_state(GameState::Game)),
     )
@@ -95,7 +104,12 @@ const ENEMY_SHEET_WIDTH: u32 = 256;
 const ENEMY_SHEET_HEIGHT: u32 = 256;
 const ENEMY_IDLE_ROW: usize = 0;
 const ENEMY_MOVE_ROW: usize = 1;
+const ENEMY_STUNNED_ROW: usize = 2;
+const ENEMY_DEATH_ROW: usize = 3;
 const ENEMY_ANIMATION_FRAMES: usize = 4;
+const ENEMY_HEALTH_BAR_WIDTH: f32 = 48.0;
+const ENEMY_HEALTH_BAR_HEIGHT: f32 = 6.0;
+const ENEMY_HEALTH_BAR_OFFSET: Vec2 = Vec2::new(0.0, 46.0);
 
 #[derive(Component)]
 struct Enemy;
@@ -109,6 +123,23 @@ struct EnemyMovement {
     attack_distance: f32,
 }
 
+/// Stun refreshes to the full duration when it is applied again.
+#[derive(Component, Clone, Copy, Debug)]
+struct Stunned {
+    remaining: f32,
+}
+
+#[derive(Component, Clone, Debug)]
+struct Dying {
+    animation: Handle<Animation>,
+}
+
+#[derive(Component)]
+struct EnemyHealthBar;
+
+#[derive(Component)]
+struct EnemyHealthBarFill;
+
 #[derive(Resource, Default)]
 struct EnemiesSpawned(bool);
 
@@ -116,6 +147,8 @@ struct EnemiesSpawned(bool);
 struct EnemyAnimations {
     idle: Handle<Animation>,
     movement: Handle<Animation>,
+    stunned: Handle<Animation>,
+    death: Handle<Animation>,
 }
 
 #[derive(Resource)]
@@ -314,6 +347,8 @@ fn setup_enemy_animations(
     commands.insert_resource(EnemyAnimations {
         idle: make_animation(&mut animations, ENEMY_IDLE_ROW),
         movement: make_animation(&mut animations, ENEMY_MOVE_ROW),
+        stunned: make_animation(&mut animations, ENEMY_STUNNED_ROW),
+        death: make_animation(&mut animations, ENEMY_DEATH_ROW),
     });
 }
 
@@ -499,6 +534,27 @@ fn enemy_chase_position(
     }
 }
 
+#[allow(dead_code)] // Step 10 invokes this when a shockwave applies or refreshes stun.
+fn refreshed_stun(duration: f32) -> Stunned {
+    // Reapplying stun deliberately resets, rather than stacks, its duration.
+    Stunned {
+        remaining: duration,
+    }
+}
+
+fn tick_stunned_enemies(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut enemies: Query<(Entity, &mut Stunned), With<Enemy>>,
+) {
+    for (enemy, mut stunned) in &mut enemies {
+        stunned.remaining -= time.delta_secs();
+        if stunned.remaining <= 0.0 {
+            commands.entity(enemy).remove::<Stunned>();
+        }
+    }
+}
+
 fn update_enemies(
     time: Res<Time>,
     game_map: Res<GameMap>,
@@ -509,7 +565,9 @@ fn update_enemies(
             &mut Transform,
             &mut Facing,
             &EnemyCollider,
-            &EnemyMovement,
+            Option<&EnemyMovement>,
+            Option<&Stunned>,
+            Option<&Dying>,
             &mut SpritesheetAnimation,
         ),
         (With<Enemy>, Without<Player>),
@@ -517,7 +575,22 @@ fn update_enemies(
 ) {
     let occupancy = collision::Occupancy::terrain_only(&game_map.0);
     let player_position = player.translation.xy();
-    for (mut transform, mut facing, collider, movement, mut animation) in &mut enemies {
+    for (mut transform, mut facing, collider, movement, stunned, dying, mut animation) in
+        &mut enemies
+    {
+        if let Some(dying) = dying {
+            if animation.animation != dying.animation {
+                animation.switch(dying.animation.clone());
+            }
+            continue;
+        }
+        if stunned.is_some_and(|stunned| stunned.remaining > 0.0) {
+            if animation.animation != animations.stunned {
+                animation.switch(animations.stunned.clone());
+            }
+            continue;
+        }
+        let Some(movement) = movement else { continue };
         let direction = player_position - transform.translation.xy();
         let next_position = enemy_chase_position(
             transform.translation.xy(),
@@ -535,6 +608,100 @@ fn update_enemies(
             transform.translation = next_position.extend(transform.translation.z);
         } else if animation.animation != animations.idle {
             animation.switch(animations.idle.clone());
+        }
+    }
+}
+
+fn spawn_enemy_health_bars(mut commands: Commands, enemies: Query<Entity, Added<Enemy>>) {
+    for enemy in &enemies {
+        commands.entity(enemy).with_children(|parent| {
+            parent.spawn((
+                EnemyHealthBar,
+                Sprite {
+                    color: Color::srgb(0.15, 0.05, 0.05),
+                    custom_size: Some(Vec2::new(ENEMY_HEALTH_BAR_WIDTH, ENEMY_HEALTH_BAR_HEIGHT)),
+                    ..default()
+                },
+                Transform::from_translation(ENEMY_HEALTH_BAR_OFFSET.extend(0.1)),
+            ));
+            parent.spawn((
+                EnemyHealthBarFill,
+                Sprite {
+                    color: Color::srgb(0.2, 0.9, 0.25),
+                    custom_size: Some(Vec2::new(ENEMY_HEALTH_BAR_WIDTH, ENEMY_HEALTH_BAR_HEIGHT)),
+                    ..default()
+                },
+                Transform::from_translation(
+                    (ENEMY_HEALTH_BAR_OFFSET + Vec2::new(-ENEMY_HEALTH_BAR_WIDTH / 2.0, 0.0))
+                        .extend(0.2),
+                ),
+            ));
+        });
+    }
+}
+
+fn update_enemy_health_bars(
+    enemies: Query<(&Health, &Children), (With<Enemy>, Without<Dying>)>,
+    mut fills: Query<(&mut Transform, &mut Visibility), With<EnemyHealthBarFill>>,
+) {
+    for (health, children) in &enemies {
+        let ratio = health_bar_ratio(*health);
+        for child in children.iter() {
+            if let Ok((mut transform, mut visibility)) = fills.get_mut(child) {
+                transform.scale.x = ratio;
+                *visibility = Visibility::Visible;
+            }
+        }
+    }
+}
+
+fn health_bar_ratio(health: Health) -> f32 {
+    if health.max <= 0.0 {
+        0.0
+    } else {
+        (health.current / health.max).clamp(0.0, 1.0)
+    }
+}
+
+fn begin_enemy_deaths(
+    mut commands: Commands,
+    animations: Res<EnemyAnimations>,
+    enemies: Query<(Entity, &Health, Option<&Children>), (With<Enemy>, Without<Dying>)>,
+) {
+    for (enemy, health, children) in &enemies {
+        if health.current <= 0.0 {
+            if let Some(children) = children {
+                for child in children.iter() {
+                    commands.entity(child).insert(Visibility::Hidden);
+                }
+            }
+            commands.entity(enemy).insert(Dying {
+                animation: animations.death.clone(),
+            });
+            commands
+                .entity(enemy)
+                .remove::<(EnemyMovement, Hitbox, Health, Stunned)>();
+        }
+    }
+}
+
+fn finish_enemy_deaths(
+    mut commands: Commands,
+    enemies: Query<(Entity, &Dying)>,
+    mut animation_events: MessageReader<AnimationEvent>,
+) {
+    for event in animation_events.read() {
+        let (AnimationEvent::AnimationEnd { entity, animation }
+        | AnimationEvent::AnimationRepetitionEnd {
+            entity, animation, ..
+        }) = event
+        else {
+            continue;
+        };
+        if let Ok((enemy, dying)) = enemies.get(*entity)
+            && *animation == dying.animation
+        {
+            commands.entity(enemy).despawn();
         }
     }
 }
@@ -1997,6 +2164,8 @@ mod tests {
             .insert_resource(EnemyAnimations {
                 idle: Handle::default(),
                 movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
             })
             .init_resource::<EnemiesSpawned>()
             .add_systems(Update, spawn_enemies_from_map);
@@ -2066,6 +2235,8 @@ mod tests {
             .insert_resource(EnemyAnimations {
                 idle: Handle::default(),
                 movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
             })
             .insert_resource(TimeUpdateStrategy::ManualDuration(
                 std::time::Duration::from_secs_f32(0.1),
@@ -2128,6 +2299,150 @@ mod tests {
             app.world().entity(enemy).get::<Health>().unwrap().current,
             60.0
         );
+    }
+
+    #[test]
+    fn health_bar_ratio_is_clamped() {
+        assert_eq!(
+            health_bar_ratio(Health {
+                current: 50.0,
+                max: 100.0
+            }),
+            0.5
+        );
+        assert_eq!(
+            health_bar_ratio(Health {
+                current: -1.0,
+                max: 100.0
+            }),
+            0.0
+        );
+        assert_eq!(
+            health_bar_ratio(Health {
+                current: 101.0,
+                max: 100.0
+            }),
+            1.0
+        );
+        assert_eq!(
+            health_bar_ratio(Health {
+                current: 1.0,
+                max: 0.0
+            }),
+            0.0
+        );
+    }
+
+    #[test]
+    fn stun_resets_duration_and_prevents_movement() {
+        assert_eq!(refreshed_stun(2.0).remaining, 2.0);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(GameMap(floor_rect(-1..=2, -1..=1)))
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
+            })
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.1),
+            ))
+            .add_systems(Update, update_enemies);
+        app.world_mut()
+            .spawn((Player, Transform::from_xyz(96.0, 0.0, 0.0)));
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Facing::Right,
+                Stunned { remaining: 2.0 },
+                EnemyCollider(Collider::new(ENEMY_COLLIDER_SIZE, ENEMY_COLLIDER_OFFSET)),
+                EnemyMovement {
+                    speed: 55.0,
+                    attack_distance: 64.0,
+                },
+                SpritesheetAnimation::new(Handle::default()),
+                Transform::default(),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(enemy)
+                .get::<Transform>()
+                .unwrap()
+                .translation
+                .xy(),
+            Vec2::ZERO
+        );
+    }
+
+    #[test]
+    fn death_is_one_way_ignores_post_mortem_damage_and_waits_for_animation() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<Damage>()
+            .add_message::<AnimationEvent>()
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
+            })
+            .add_systems(
+                Update,
+                (apply_damage, begin_enemy_deaths, finish_enemy_deaths).chain(),
+            );
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Health {
+                    current: 20.0,
+                    max: 20.0,
+                },
+                Hitbox(Collider::new(Vec2::ONE, Vec2::ZERO)),
+                EnemyMovement {
+                    speed: 1.0,
+                    attack_distance: 1.0,
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<Messages<Damage>>()
+            .write(Damage {
+                target: enemy,
+                amount: 20.0,
+            });
+        app.update();
+        app.update();
+        assert!(app.world().entity(enemy).contains::<Dying>());
+        assert!(!app.world().entity(enemy).contains::<Health>());
+        app.world_mut()
+            .resource_mut::<Messages<Damage>>()
+            .write(Damage {
+                target: enemy,
+                amount: 20.0,
+            });
+        app.update();
+        assert!(app.world().get_entity(enemy).is_ok());
+        let death_animation = app
+            .world()
+            .entity(enemy)
+            .get::<Dying>()
+            .unwrap()
+            .animation
+            .clone();
+        app.world_mut()
+            .resource_mut::<Messages<AnimationEvent>>()
+            .write(AnimationEvent::AnimationEnd {
+                entity: enemy,
+                animation: death_animation,
+            });
+        app.update();
+        app.update();
+        assert!(app.world().get_entity(enemy).is_err());
     }
 
     #[test]
