@@ -4,7 +4,8 @@
 use bevy::{app::AppExit, prelude::*};
 use bevy_spritesheet_animation::prelude::*;
 use map_support::{
-    map::{self, TILE_SIZE, TerrainTile},
+    collision::{self, Collider},
+    map,
     tilemap::{self, TerrainAtlas, TerrainTilemapPlugin},
 };
 
@@ -56,10 +57,7 @@ const PLAYER_COLLIDER_OFFSET: Vec2 = Vec2::new(0.0, -24.0);
 struct Player;
 
 #[derive(Component, Clone, Copy)]
-struct PlayerCollider {
-    size: Vec2,
-    offset: Vec2,
-}
+struct PlayerCollider(Collider);
 
 #[derive(Resource)]
 struct GameMap(map::MapData);
@@ -165,10 +163,7 @@ fn spawn_character(
 
     commands.spawn((
         Player,
-        PlayerCollider {
-            size: PLAYER_COLLIDER_SIZE,
-            offset: PLAYER_COLLIDER_OFFSET,
-        },
+        PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
         Facing::Right,
         sprite,
         SpritesheetAnimation::new(idle_animation_handle),
@@ -215,8 +210,8 @@ fn draw_collision_debug(
     if collision_debug.enabled {
         let (transform, collider) = *player;
         gizmos.rect_2d(
-            transform.translation.xy() + collider.offset,
-            collider.size,
+            transform.translation.xy() + collider.0.offset,
+            collider.0.size,
             Color::srgb(1.0, 0.0, 1.0),
         );
     }
@@ -359,48 +354,14 @@ fn move_with_collision(
     movement: Vec2,
     map: &map::MapData,
 ) {
-    let horizontal_movement = Vec2::new(movement.x, 0.0);
-    if can_occupy(
-        transform.translation.xy() + horizontal_movement,
-        collider,
-        map,
-    ) {
-        transform.translation += horizontal_movement.extend(0.0);
-    }
-
-    let vertical_movement = Vec2::new(0.0, movement.y);
-    if can_occupy(
-        transform.translation.xy() + vertical_movement,
-        collider,
-        map,
-    ) {
-        transform.translation += vertical_movement.extend(0.0);
-    }
-}
-
-fn can_occupy(position: Vec2, collider: &PlayerCollider, map: &map::MapData) -> bool {
-    let collider_center = position + collider.offset;
-    let half_size = collider.size / 2.0;
-    let min = collider_center - half_size;
-    let max = collider_center + half_size;
-    let half_tile = TILE_SIZE / 2.0;
-
-    // Tiles are centered on integer grid coordinates, so shift by half a tile before
-    // converting world positions to grid positions. The tiny epsilon keeps a collider
-    // that exactly touches an edge from entering the neighboring tile.
-    let min_x = ((min.x + half_tile) / TILE_SIZE).floor() as i32;
-    let max_x = ((max.x + half_tile - f32::EPSILON) / TILE_SIZE).floor() as i32;
-    let min_y = ((min.y + half_tile) / TILE_SIZE).floor() as i32;
-    let max_y = ((max.y + half_tile - f32::EPSILON) / TILE_SIZE).floor() as i32;
-
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            if map.tile_at(x, y) != Some(TerrainTile::Floor) {
-                return false;
-            }
-        }
-    }
-    true
+    let occupancy = collision::Occupancy::terrain_only(map);
+    let next_position = collision::move_axis_separated(
+        transform.translation.xy(),
+        movement,
+        collider.0,
+        &occupancy,
+    );
+    transform.translation = next_position.extend(transform.translation.z);
 }
 
 fn control_character(

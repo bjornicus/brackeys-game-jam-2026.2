@@ -81,12 +81,12 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Capture current behavior and make future logic testable without changing gameplay.
 
-- [ ] Run and record baseline `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` results.
-- [ ] Add unit tests for existing map passability: floor accepts a fitting collider; wall, missing sparse tile, and a collider spanning a wall reject it.
-- [ ] Move `PlayerCollider`'s geometry into a reusable AABB/collider type in `src/collision.rs` while retaining the current player dimensions and behavior.
-- [ ] Move `can_occupy` and axis-separated terrain movement into reusable functions. Keep a thin game-specific wrapper if Bevy query data would otherwise leak into pure code.
-- [ ] Design occupancy as one shared operation used later by player movement, enemy movement, and teleport. Terrain is the only blocker now, but leave an explicit extension point for dynamic movement blockers.
-- [ ] Preserve F3 collision debug drawing.
+- [x] Run and record baseline `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` results.
+- [x] Add unit tests for existing map passability: floor accepts a fitting collider; wall, missing sparse tile, and a collider spanning a wall reject it.
+- [x] Move `PlayerCollider`'s geometry into a reusable AABB/collider type in `src/collision.rs` while retaining the current player dimensions and behavior.
+- [x] Move `can_occupy` and axis-separated terrain movement into reusable functions. Keep a thin game-specific wrapper if Bevy query data would otherwise leak into pure code.
+- [x] Design occupancy as one shared operation used later by player movement, enemy movement, and teleport. Terrain is the only blocker now, but leave an explicit extension point for dynamic movement blockers.
+- [x] Preserve F3 collision debug drawing.
 
 **Automated acceptance:** Existing map behavior tests pass, including exact tile-edge contact and sparse-map rejection. `cargo check --all-targets` passes.
 
@@ -308,3 +308,4 @@ All tests must pass without opening windows and should run in seconds after comp
 Add one short entry per completed step, for example:
 
 - `Step N — YYYY-MM-DD`: summary; files changed; validation commands; known follow-up.
+- `Step 0 — 2026-08-27`: Added reusable collision AABB/collider, shared terrain occupancy and axis-separated movement helper with dynamic blocker extension point; updated player movement/debug drawing to use the shared helpers. Files changed: `src/collision.rs`, `src/game.rs`, `src/lib.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual smoke not run.
