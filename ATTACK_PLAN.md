@@ -71,7 +71,7 @@ Keep `src/game.rs` primarily as plugin/system registration and split behavior be
 4. Implement only the current step and its tests. Avoid speculative features from later steps.
 5. Run `cargo fmt --check`, the targeted tests, `cargo test`, and `cargo check --all-targets` before handoff. After the initial compile, tests should finish in seconds.
 6. Perform the listed manual smoke check when the step changes visible/runtime behavior.
-7. Mark the step complete and add a short note under **Implementation log** with files changed, commands run, and any remaining issue.
+7. Mark the step complete and add a short note under **Implementation log** with files changed, commands run, and any remaining issue. include listing exactly which manual validation was not run so the human operator knows what to test before moving to the next step.
 
 For headless ECS tests, construct a minimal `App`, add only required plugins/resources/systems, and advance `Time` manually. Do not start a window, load GPU assets, sleep, or depend on frame rate. Refer to Bevy's own crate tests and the local `bevy_spritesheet_animation` headless/events examples rather than the remote-control integration example.
 
@@ -96,11 +96,11 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Make enemy spawn positions persistent without yet implementing enemies.
 
-- [ ] Add a serializable map entity representation, initially an `Enemy` kind plus integer tile coordinates. Prefer an enum that can be extended over parallel ad-hoc vectors.
-- [ ] Add `entities` to `MapData` with `#[serde(default)]`, so existing RON files that only contain `tiles` still load.
-- [ ] Add focused helpers such as `entity_at`, `place_entity`, and `remove_entity`; enforce at most one map entity per tile for now.
-- [ ] Keep terrain and entity layers independent: adding/removing an enemy must not modify terrain.
-- [ ] Add one or more enemy placements on valid floor tiles in `assets/maps/initial.ron` for testing.
+- [x] Add a serializable map entity representation, initially an `Enemy` kind plus integer tile coordinates. Prefer an enum that can be extended over parallel ad-hoc vectors.
+- [x] Add `entities` to `MapData` with `#[serde(default)]`, so existing RON files that only contain `tiles` still load.
+- [x] Add focused helpers such as `entity_at`, `place_entity`, and `remove_entity`; enforce at most one map entity per tile for now.
+- [x] Keep terrain and entity layers independent: adding/removing an enemy must not modify terrain.
+- [x] Add one or more enemy placements on valid floor tiles in `assets/maps/initial.ron` for testing.
 
 **Automated acceptance:** Tests cover old RON compatibility, new RON round-trip, replacement/idempotent placement, and layer-independent removal.
 
@@ -110,12 +110,12 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Place and remove enemies at tile centers.
 
-- [ ] Add an editor palette mode for `Enemy` (suggested editor key `3`; editor key conflicts do not affect game controls).
-- [ ] Render map entity markers using a simple colored placeholder sprite/shape until the generated enemy sheet is introduced.
-- [ ] In enemy mode, left click places an enemy only on an explicit floor tile; right click removes an enemy only. Terrain mode retains current paint/delete behavior.
-- [ ] Update palette text so selected layer and mouse behavior are unambiguous.
-- [ ] Ensure repainting terrain redraws entity markers rather than losing or duplicating them.
-- [ ] Save placements through the existing Ctrl+S flow.
+- [x] Add an editor palette mode for `Enemy` (suggested editor key `3`; editor key conflicts do not affect game controls).
+- [x] Render map entity markers using a simple colored placeholder sprite/shape until the generated enemy sheet is introduced.
+- [x] In enemy mode, left click places an enemy only on an explicit floor tile; right click removes an enemy only. Terrain mode retains current paint/delete behavior.
+- [x] Update palette text so selected layer and mouse behavior are unambiguous.
+- [x] Ensure repainting terrain redraws entity markers rather than losing or duplicating them.
+- [x] Save placements through the existing Ctrl+S flow.
 
 **Automated acceptance:** Keep placement validity in pure helpers and test floor, wall, and missing-tile cases. Map serialization tests remain green.
 
@@ -125,13 +125,13 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Provide deterministic art sufficient to verify every direction and state.
 
-- [ ] Add a small reproducible generator under `tools/` and check generated PNG files into `assets/sprites/`. Avoid a runtime dependency. If the generator needs a development-only tool, document its exact command.
-- [ ] Prefer a new fixed-layout player sheet containing, for each of four directions: idle, move, and shoot frames. Make directions visually unmistakable (for example, weapon/arrow orientation and direction colors).
-- [ ] Generate an enemy sheet with move/idle, stunned, and death frames. A simple colored creature silhouette is enough.
-- [ ] Document sheet dimensions, cell size, row/frame ranges, origin convention, and replacement expectations in `assets/sprites/PLACEHOLDERS.md`.
-- [ ] Replace hard-coded row numbers with named animation-layout constants.
-- [ ] Add four-way `Facing` and player animation handles for idle/move/shoot. Movement input selects facing by dominant axis and uses `move_up`/`move_down` as well as left/right.
-- [ ] Preserve normalized diagonal speed.
+- [x] Add a small reproducible generator under `tools/` and check generated PNG files into `assets/sprites/`. Avoid a runtime dependency. If the generator needs a development-only tool, document its exact command.
+- [x] Prefer a new fixed-layout player sheet containing, for each of four directions: idle, move, and shoot frames. Make directions visually unmistakable (for example, weapon/arrow orientation and direction colors).
+- [x] Generate an enemy sheet with move/idle, stunned, and death frames. A simple colored creature silhouette is enough.
+- [x] Document sheet dimensions, cell size, row/frame ranges, origin convention, and replacement expectations in `assets/sprites/PLACEHOLDERS.md`.
+- [x] Replace hard-coded row numbers with named animation-layout constants.
+- [x] Add four-way `Facing` and player animation handles for idle/move/shoot. Movement input selects facing by dominant axis and uses `move_up`/`move_down` as well as left/right.
+- [x] Preserve normalized diagonal speed.
 
 **Automated acceptance:** Test dominant-axis facing selection, tie behavior, and sprite-sheet layout constants/dimensions where practical.
 
@@ -309,3 +309,6 @@ Add one short entry per completed step, for example:
 
 - `Step N — YYYY-MM-DD`: summary; files changed; validation commands; known follow-up.
 - `Step 0 — 2026-08-27`: Added reusable collision AABB/collider, shared terrain occupancy and axis-separated movement helper with dynamic blocker extension point; updated player movement/debug drawing to use the shared helpers. Files changed: `src/collision.rs`, `src/game.rs`, `src/lib.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual smoke not run.
+- `Step 1 — 2026-08-27`: Added serializable map entity placements with an extensible `MapEntityKind::Enemy`, default-compatible `entities`, entity placement/removal helpers, tests for compatibility/round-trip/idempotency/layer independence, and two floor-tile enemy records in `assets/maps/initial.ron`. Files changed: `src/map.rs`, `src/collision.rs`, `assets/maps/initial.ron`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Targeted map tests passed. Manual game/editor smoke not run.
+- `Step 2 — 2026-08-28`: Added map editor enemy entity palette mode on key `3`, placeholder enemy markers, enemy-only placement/removal behavior with explicit-floor validation, marker redraw on map repaint, and pure helper/tests for entity placement validity. Files changed: `src/bin/map_editor.rs`, `src/map.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual editor smoke not run.
+- `Step 3 — 2026-08-28`: Added a stdlib-only placeholder sprite generator, checked in fixed-layout player/enemy PNG sheets, documented replacement/layout details, and switched player animation setup to named four-way idle/move/shoot layout constants with dominant-axis facing tests. Files changed: `tools/generate_placeholder_sprites.py`, `assets/sprites/character_placeholder.png`, `assets/sprites/enemy_placeholder.png`, `assets/sprites/PLACEHOLDERS.md`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual movement smoke not run.

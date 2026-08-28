@@ -131,6 +131,7 @@ mod tests {
                 .into_iter()
                 .map(|(x, y, tile)| MapTile { x, y, tile })
                 .collect(),
+            entities: Vec::new(),
         }
     }
 

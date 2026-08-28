@@ -11,6 +11,16 @@ pub struct TerrainAtlas {
     layout: Handle<TextureAtlasLayout>,
 }
 
+impl TerrainAtlas {
+    pub fn image(&self) -> Handle<Image> {
+        self.image.clone()
+    }
+
+    pub fn layout(&self) -> Handle<TextureAtlasLayout> {
+        self.layout.clone()
+    }
+}
+
 pub struct TerrainTilemapPlugin;
 
 impl Plugin for TerrainTilemapPlugin {

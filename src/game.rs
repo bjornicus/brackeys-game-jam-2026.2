@@ -76,13 +76,46 @@ enum PauseMenuAction {
     Quit,
 }
 
+const PLAYER_SHEET_COLUMNS: usize = 4;
+const PLAYER_SHEET_ROWS: usize = 12;
+const PLAYER_SHEET_WIDTH: u32 = 256;
+const PLAYER_SHEET_HEIGHT: u32 = 768;
+const PLAYER_IDLE_FRAMES: usize = 2;
+const PLAYER_MOVE_FRAMES: usize = 4;
+const PLAYER_SHOOT_FRAMES: usize = 4;
+const PLAYER_STATES_PER_DIRECTION: usize = 3;
+const PLAYER_IDLE_STATE_ROW_OFFSET: usize = 0;
+const PLAYER_MOVE_STATE_ROW_OFFSET: usize = 1;
+const PLAYER_SHOOT_STATE_ROW_OFFSET: usize = 2;
+
+fn player_animation_row(facing: Facing, state_row_offset: usize) -> usize {
+    facing as usize * PLAYER_STATES_PER_DIRECTION + state_row_offset
+}
+
 // Let's use a custom resource to store our animations and access them across systems
 #[derive(Resource)]
 struct PlayerAnimations {
-    idle: Handle<Animation>,
-    move_right: Handle<Animation>,
-    move_left: Handle<Animation>,
-    shoot: Handle<Animation>,
+    idle: [Handle<Animation>; 4],
+    movement: [Handle<Animation>; 4],
+    shoot: [Handle<Animation>; 4],
+}
+
+impl PlayerAnimations {
+    fn idle_for(&self, facing: Facing) -> &Handle<Animation> {
+        &self.idle[facing.animation_index()]
+    }
+
+    fn movement_for(&self, facing: Facing) -> &Handle<Animation> {
+        &self.movement[facing.animation_index()]
+    }
+
+    fn shoot_for(&self, facing: Facing) -> &Handle<Animation> {
+        &self.shoot[facing.animation_index()]
+    }
+
+    fn is_shoot_animation(&self, handle: &Handle<Animation>) -> bool {
+        self.shoot.iter().any(|shoot| shoot == handle)
+    }
 }
 
 fn setup_scene(
@@ -116,49 +149,53 @@ fn spawn_character(
 
     // Create the animations
 
-    let image = assets.load("sprites/character.png");
+    let image = assets.load("sprites/character_placeholder.png");
 
-    let spritesheet = Spritesheet::new(&image, 8, 8);
+    let spritesheet = Spritesheet::new(&image, PLAYER_SHEET_COLUMNS, PLAYER_SHEET_ROWS);
 
-    // Idle
+    let make_strip_animation = |animations: &mut Assets<Animation>, row, frames| {
+        animations.add(
+            spritesheet
+                .create_animation()
+                .add_horizontal_strip(0, row, frames)
+                .build(),
+        )
+    };
 
-    let idle_animation = spritesheet
-        .create_animation()
-        .add_horizontal_strip(0, 0, 5)
-        .build();
-
-    let idle_animation_handle = animations.add(idle_animation);
-
-    // Movement animations. Row 2 faces left and row 3 faces right.
-
-    let move_left_animation = spritesheet.create_animation().add_row(2).build();
-    let move_left_animation_handle = animations.add(move_left_animation);
-
-    let move_right_animation = spritesheet.create_animation().add_row(3).build();
-    let move_right_animation_handle = animations.add(move_right_animation);
-
-    // Shoot
-
-    let shoot_animation = spritesheet
-        .create_animation()
-        .add_horizontal_strip(0, 5, 5)
-        .build();
-
-    let shoot_animation_handle = animations.add(shoot_animation);
+    let idle = Facing::ALL.map(|facing| {
+        make_strip_animation(
+            &mut animations,
+            player_animation_row(facing, PLAYER_IDLE_STATE_ROW_OFFSET),
+            PLAYER_IDLE_FRAMES,
+        )
+    });
+    let movement = Facing::ALL.map(|facing| {
+        make_strip_animation(
+            &mut animations,
+            player_animation_row(facing, PLAYER_MOVE_STATE_ROW_OFFSET),
+            PLAYER_MOVE_FRAMES,
+        )
+    });
+    let shoot = Facing::ALL.map(|facing| {
+        make_strip_animation(
+            &mut animations,
+            player_animation_row(facing, PLAYER_SHOOT_STATE_ROW_OFFSET),
+            PLAYER_SHOOT_FRAMES,
+        )
+    });
 
     // Store the animations as a resource
 
     commands.insert_resource(PlayerAnimations {
-        idle: idle_animation_handle.clone(),
-        move_right: move_right_animation_handle,
-        move_left: move_left_animation_handle,
-        shoot: shoot_animation_handle,
+        idle: idle.clone(),
+        movement,
+        shoot,
     });
 
     // Spawn the character
 
     let sprite = spritesheet
-        .with_size_hint(768, 768)
+        .with_size_hint(PLAYER_SHEET_WIDTH, PLAYER_SHEET_HEIGHT)
         .sprite(&mut atlas_layouts);
 
     commands.spawn((
@@ -166,7 +203,7 @@ fn spawn_character(
         PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
         Facing::Right,
         sprite,
-        SpritesheetAnimation::new(idle_animation_handle),
+        SpritesheetAnimation::new(idle[Facing::Right.animation_index()].clone()),
         Transform::from_xyz(0., 0., 2.),
     ));
 }
@@ -336,12 +373,39 @@ fn update_camera(
         .smooth_nudge(&direction, CAMERA_DECAY_RATE, time.delta_secs());
 }
 
-// Records the last horizontal direction so vertical-only movement can use the
-// corresponding movement animation.
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
 enum Facing {
-    Left,
-    Right,
+    Right = 0,
+    Left = 1,
+    Up = 2,
+    Down = 3,
+}
+
+impl Facing {
+    const ALL: [Self; 4] = [Self::Right, Self::Left, Self::Up, Self::Down];
+
+    fn animation_index(self) -> usize {
+        self as usize
+    }
+}
+
+fn facing_from_direction(direction: Vec2, current: Facing) -> Facing {
+    if direction == Vec2::ZERO {
+        return current;
+    }
+
+    if direction.x.abs() >= direction.y.abs() {
+        if direction.x < 0.0 {
+            Facing::Left
+        } else {
+            Facing::Right
+        }
+    } else if direction.y < 0.0 {
+        Facing::Down
+    } else {
+        Facing::Up
+    }
 }
 
 // Component to mark that a character is currently shooting
@@ -392,7 +456,7 @@ fn control_character(
         if keyboard.pressed(KeyCode::Space) {
             // Set the animation
 
-            animation.switch(my_animations.shoot.clone());
+            animation.switch(my_animations.shoot_for(*facing).clone());
 
             // Add a Shooting component
 
@@ -414,26 +478,20 @@ fn control_character(
             }
 
             if direction != Vec2::ZERO {
-                // Horizontal input takes priority for diagonal movement. Vertical-only
-                // movement uses the most recently selected horizontal facing direction.
-                if direction.x < 0. {
-                    *facing = Facing::Left;
-                } else if direction.x > 0. {
-                    *facing = Facing::Right;
-                }
+                *facing = facing_from_direction(direction, *facing);
 
-                let movement_animation = match *facing {
-                    Facing::Left => &my_animations.move_left,
-                    Facing::Right => &my_animations.move_right,
-                };
+                let movement_animation = my_animations.movement_for(*facing);
                 if animation.animation != *movement_animation {
                     animation.switch(movement_animation.clone());
                 }
 
                 let move_delta = direction.normalize() * PLAYER_SPEED * time.delta_secs();
                 move_with_collision(&mut transform, collider, move_delta, &game_map.0);
-            } else if animation.animation != my_animations.idle {
-                animation.switch(my_animations.idle.clone());
+            } else {
+                let idle_animation = my_animations.idle_for(*facing);
+                if animation.animation != *idle_animation {
+                    animation.switch(idle_animation.clone());
+                }
             }
         }
     }
@@ -447,9 +505,88 @@ fn control_character(
         if let AnimationEvent::AnimationRepetitionEnd {
             entity, animation, ..
         } = event
-            && animation == &my_animations.shoot
+            && my_animations.is_shoot_animation(animation)
         {
             commands.entity(*entity).remove::<Shooting>();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dominant_axis_selects_cardinal_facing() {
+        assert_eq!(
+            facing_from_direction(Vec2::new(5.0, 2.0), Facing::Left),
+            Facing::Right
+        );
+        assert_eq!(
+            facing_from_direction(Vec2::new(-5.0, 2.0), Facing::Right),
+            Facing::Left
+        );
+        assert_eq!(
+            facing_from_direction(Vec2::new(2.0, 5.0), Facing::Down),
+            Facing::Up
+        );
+        assert_eq!(
+            facing_from_direction(Vec2::new(2.0, -5.0), Facing::Up),
+            Facing::Down
+        );
+    }
+
+    #[test]
+    fn horizontal_wins_exact_diagonal_ties() {
+        assert_eq!(
+            facing_from_direction(Vec2::new(1.0, 1.0), Facing::Down),
+            Facing::Right
+        );
+        assert_eq!(
+            facing_from_direction(Vec2::new(-1.0, -1.0), Facing::Up),
+            Facing::Left
+        );
+    }
+
+    #[test]
+    fn zero_direction_retains_current_facing() {
+        for facing in Facing::ALL {
+            assert_eq!(facing_from_direction(Vec2::ZERO, facing), facing);
+        }
+    }
+
+    #[test]
+    fn player_sheet_layout_constants_match_documented_dimensions() {
+        assert_eq!(PLAYER_SHEET_COLUMNS * 64, PLAYER_SHEET_WIDTH as usize);
+        assert_eq!(PLAYER_SHEET_ROWS * 64, PLAYER_SHEET_HEIGHT as usize);
+        assert_eq!(
+            PLAYER_STATES_PER_DIRECTION * Facing::ALL.len(),
+            PLAYER_SHEET_ROWS
+        );
+
+        assert_eq!(
+            player_animation_row(Facing::Right, PLAYER_IDLE_STATE_ROW_OFFSET),
+            0
+        );
+        assert_eq!(
+            player_animation_row(Facing::Right, PLAYER_MOVE_STATE_ROW_OFFSET),
+            1
+        );
+        assert_eq!(
+            player_animation_row(Facing::Right, PLAYER_SHOOT_STATE_ROW_OFFSET),
+            2
+        );
+        assert_eq!(
+            player_animation_row(Facing::Left, PLAYER_IDLE_STATE_ROW_OFFSET),
+            3
+        );
+        assert_eq!(
+            player_animation_row(Facing::Up, PLAYER_IDLE_STATE_ROW_OFFSET),
+            6
+        );
+        assert_eq!(
+            player_animation_row(Facing::Down, PLAYER_SHOOT_STATE_ROW_OFFSET),
+            11
+        );
     }
 }

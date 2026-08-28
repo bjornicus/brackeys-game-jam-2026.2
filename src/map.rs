@@ -20,9 +20,23 @@ pub struct MapTile {
     pub tile: TerrainTile,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum MapEntityKind {
+    Enemy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapEntity {
+    pub x: i32,
+    pub y: i32,
+    pub kind: MapEntityKind,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct MapData {
     pub tiles: Vec<MapTile>,
+    #[serde(default)]
+    pub entities: Vec<MapEntity>,
 }
 
 impl MapData {
@@ -38,7 +52,10 @@ impl MapData {
                 tiles.push(MapTile { x, y, tile });
             }
         }
-        Self { tiles }
+        Self {
+            tiles,
+            entities: Vec::new(),
+        }
     }
 
     pub fn tile_at(&self, x: i32, y: i32) -> Option<TerrainTile> {
@@ -64,6 +81,46 @@ impl MapData {
         let original_len = self.tiles.len();
         self.tiles.retain(|entry| entry.x != x || entry.y != y);
         self.tiles.len() != original_len
+    }
+
+    pub fn entity_at(&self, x: i32, y: i32) -> Option<MapEntity> {
+        self.entities
+            .iter()
+            .find(|entry| entry.x == x && entry.y == y)
+            .copied()
+    }
+
+    pub fn can_place_entity(&self, x: i32, y: i32) -> bool {
+        self.tile_at(x, y) == Some(TerrainTile::Floor)
+    }
+
+    pub fn place_entity(&mut self, x: i32, y: i32, kind: MapEntityKind) -> Option<MapEntity> {
+        if let Some(existing) = self
+            .entities
+            .iter_mut()
+            .find(|entry| entry.x == x && entry.y == y)
+        {
+            let previous = *existing;
+            *existing = MapEntity { x, y, kind };
+            Some(previous)
+        } else {
+            self.entities.push(MapEntity { x, y, kind });
+            None
+        }
+    }
+
+    pub fn try_place_entity(&mut self, x: i32, y: i32, kind: MapEntityKind) -> bool {
+        if !self.can_place_entity(x, y) {
+            return false;
+        }
+        self.place_entity(x, y, kind);
+        true
+    }
+
+    pub fn remove_entity(&mut self, x: i32, y: i32) -> bool {
+        let original_len = self.entities.len();
+        self.entities.retain(|entry| entry.x != x || entry.y != y);
+        self.entities.len() != original_len
     }
 
     pub fn atlas_index_for(&self, tile: MapTile) -> usize {
@@ -102,4 +159,134 @@ pub fn save_map(name: &str, map: &MapData) -> Result<(), Box<dyn std::error::Err
         ron::ser::to_string_pretty(map, ron::ser::PrettyConfig::default())?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_ron_without_entities_loads_with_empty_entities() {
+        let map: MapData = ron::de::from_str(
+            r#"(
+                tiles: [
+                    (x: 0, y: 0, tile: Floor),
+                ],
+            )"#,
+        )
+        .unwrap();
+
+        assert_eq!(map.tile_at(0, 0), Some(TerrainTile::Floor));
+        assert!(map.entities.is_empty());
+    }
+
+    #[test]
+    fn entity_ron_round_trips() {
+        let mut map = MapData::default();
+        map.set(1, 2, TerrainTile::Floor);
+        map.place_entity(1, 2, MapEntityKind::Enemy);
+
+        let serialized = ron::ser::to_string_pretty(&map, ron::ser::PrettyConfig::default())
+            .expect("map serializes");
+        let loaded: MapData = ron::de::from_str(&serialized).expect("map deserializes");
+
+        assert_eq!(loaded.tile_at(1, 2), Some(TerrainTile::Floor));
+        assert_eq!(
+            loaded.entity_at(1, 2),
+            Some(MapEntity {
+                x: 1,
+                y: 2,
+                kind: MapEntityKind::Enemy,
+            })
+        );
+    }
+
+    #[test]
+    fn placing_entity_is_idempotent_and_replaces_same_tile() {
+        let mut map = MapData::default();
+
+        assert_eq!(map.place_entity(3, 4, MapEntityKind::Enemy), None);
+        assert_eq!(map.entities.len(), 1);
+        assert_eq!(
+            map.place_entity(3, 4, MapEntityKind::Enemy),
+            Some(MapEntity {
+                x: 3,
+                y: 4,
+                kind: MapEntityKind::Enemy,
+            })
+        );
+        assert_eq!(map.entities.len(), 1);
+        assert_eq!(
+            map.entity_at(3, 4),
+            Some(MapEntity {
+                x: 3,
+                y: 4,
+                kind: MapEntityKind::Enemy,
+            })
+        );
+    }
+
+    #[test]
+    fn terrain_and_entity_layers_are_independent() {
+        let mut map = MapData::default();
+        map.set(0, 0, TerrainTile::Floor);
+        map.place_entity(0, 0, MapEntityKind::Enemy);
+
+        assert!(map.remove(0, 0));
+        assert_eq!(map.tile_at(0, 0), None);
+        assert_eq!(
+            map.entity_at(0, 0),
+            Some(MapEntity {
+                x: 0,
+                y: 0,
+                kind: MapEntityKind::Enemy,
+            })
+        );
+
+        map.set(0, 0, TerrainTile::Wall);
+        assert!(map.remove_entity(0, 0));
+        assert_eq!(map.tile_at(0, 0), Some(TerrainTile::Wall));
+        assert_eq!(map.entity_at(0, 0), None);
+    }
+
+    #[test]
+    fn removing_missing_entity_returns_false() {
+        let mut map = MapData::default();
+
+        assert!(!map.remove_entity(0, 0));
+    }
+
+    #[test]
+    fn enemy_placement_requires_explicit_floor_tile() {
+        let mut map = MapData::default();
+        map.set(0, 0, TerrainTile::Floor);
+        map.set(1, 0, TerrainTile::Wall);
+
+        assert!(map.can_place_entity(0, 0));
+        assert!(!map.can_place_entity(1, 0));
+        assert!(!map.can_place_entity(2, 0));
+
+        assert!(map.try_place_entity(0, 0, MapEntityKind::Enemy));
+        assert!(!map.try_place_entity(1, 0, MapEntityKind::Enemy));
+        assert!(!map.try_place_entity(2, 0, MapEntityKind::Enemy));
+        assert_eq!(map.entities.len(), 1);
+        assert_eq!(
+            map.entity_at(0, 0).map(|entity| entity.kind),
+            Some(MapEntityKind::Enemy)
+        );
+    }
+
+    #[test]
+    fn initial_map_entities_are_on_floor_tiles() {
+        let map = load_map("initial").expect("initial map loads");
+
+        assert!(!map.entities.is_empty());
+        for entity in &map.entities {
+            assert_eq!(
+                map.tile_at(entity.x, entity.y),
+                Some(TerrainTile::Floor),
+                "entity should be on an explicit floor tile: {entity:?}"
+            );
+        }
+    }
 }
