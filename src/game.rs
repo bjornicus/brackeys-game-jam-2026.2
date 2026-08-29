@@ -97,21 +97,22 @@ pub fn game_plugin(app: &mut App) {
             .chain()
             .after(activate_touched_terminal)
             .before(update_attack_hud)
-            .before(update_player_health_hud)
             .run_if(in_state(GameState::Game)),
+    )
+    // Register this system once: Bevy cannot order a system type that has multiple instances.
+    // The presentation-only HUD update is safe in both gameplay and dialogue states.
+    .add_systems(
+        Update,
+        update_player_health_hud
+            .after(apply_damage)
+            .after(activate_touched_health_drop)
+            .run_if(in_state(GameState::Game).or_else(in_state(GameState::Dialogue))),
     )
     .add_systems(
         Update,
-        (tick_player_invulnerability, update_player_health_hud)
-            .chain()
+        tick_player_invulnerability
             .after(apply_damage)
             .run_if(in_state(GameState::Game)),
-    )
-    // The dialogue overlay pauses gameplay but may obscure a HUD change queued in the
-    // preceding frame, so keep this purely-presentational refresh safe in Dialogue.
-    .add_systems(
-        Update,
-        update_player_health_hud.run_if(in_state(GameState::Dialogue)),
     )
     .add_systems(
         Update,
@@ -5039,6 +5040,19 @@ mod tests {
         assert_eq!(world.query::<&RunScoped>().iter(world).count(), 1);
         assert_eq!(world.query::<&PlayerHealthBarFill>().iter(world).count(), 1);
         assert_eq!(world.query::<&PlayerHealthText>().iter(world).count(), 1);
+    }
+
+    #[test]
+    fn game_update_schedule_initializes_with_one_health_hud_system() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>();
+        game_plugin(&mut app);
+
+        // This forces Bevy to build the real Update schedule without executing Game-only
+        // systems. A duplicate `update_player_health_hud` registration made its ordering
+        // ambiguous and previously panicked at this point during startup.
+        app.world_mut().run_schedule(Update);
     }
 
     #[test]
