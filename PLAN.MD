@@ -240,16 +240,16 @@ Record a defeated enemy when it first enters `Dying`, and record a pickup before
 
 **Goal:** Give the player generic damageable health before enemies begin attacking.
 
-- [ ] Extend `CombatConfig` with player maximum health and invulnerability duration.
-- [ ] Spawn the player with the existing generic `Health`, a body `Hitbox`, and a player-specific `Invulnerable` timer only after a hit is accepted.
-- [ ] Refine the generic damage pipeline so enemy and player damage still share `Damage`; do not mutate player health directly from future enemy attack systems.
-- [ ] Add `DamageApplied` (or an equivalent explicit result seam) emitted only when health actually changes. Use it for player feedback and later death handling.
-- [ ] While the player is invulnerable, ignore incoming damage. If several damage messages target the player in one frame, accept at most one before deferred component insertion; use a local set/aggregation rather than accidentally applying all messages.
-- [ ] Tick and remove invulnerability only in `GameState::Game`.
-- [ ] Add a fixed-screen player health display with current/max text and a clamped bar. Keep it distinct from enemy world-space bars.
-- [ ] Add brief visible hit feedback on accepted damage, such as a sprite flash. Restore the normal appearance when feedback/invulnerability ends.
-- [ ] Health reaching zero should remain clamped to zero in this step; Step 8 owns the death/game-over transition.
-- [ ] Add player hitbox to F3 debug rendering with a color distinct from the feet movement collider.
+- [x] Extend `CombatConfig` with player maximum health and invulnerability duration.
+- [x] Spawn the player with the existing generic `Health`, a body `Hitbox`, and a player-specific `Invulnerable` timer only after a hit is accepted.
+- [x] Refine the generic damage pipeline so enemy and player damage still share `Damage`; do not mutate player health directly from future enemy attack systems.
+- [x] Add `DamageApplied` (or an equivalent explicit result seam) emitted only when health actually changes. Use it for player feedback and later death handling.
+- [x] While the player is invulnerable, ignore incoming damage. If several damage messages target the player in one frame, accept at most one before deferred component insertion; use a local set/aggregation rather than accidentally applying all messages.
+- [x] Tick and remove invulnerability only in `GameState::Game`.
+- [x] Add a fixed-screen player health display with current/max text and a clamped bar. Keep it distinct from enemy world-space bars.
+- [x] Add brief visible hit feedback on accepted damage, such as a sprite flash. Restore the normal appearance when feedback/invulnerability ends.
+- [x] Health reaching zero should remain clamped to zero in this step; Step 8 owns the death/game-over transition.
+- [x] Add player hitbox to F3 debug rendering with a color distinct from the feet movement collider.
 
 **Automated acceptance:** Tests cover starting health, ordinary damage, zero clamping, one accepted hit from simultaneous messages, ignored invulnerable hits, timer expiry, damage accepted afterward, `DamageApplied` only on real damage, and health-bar ratio clamping.
 
@@ -407,3 +407,4 @@ Append one entry per completed step using this format:
 - `Step 1 — 2026-08-29`: Extended map entities with terminal dialogue IDs, skill/armor pickups, and clone-safe placement helpers; updated gameplay enemy filtering and rebuilt the editor palette, labels, terminal dialogue-ID cycling, and load/save validation. Added initial-map placements and editor/map tests; updated README. Files changed: `src/map.rs`, `src/game.rs`, `src/bin/map_editor.rs`, `assets/maps/initial.ron`, `README.md`, `PLAN.MD`. Baseline/final `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual editor smoke check not run. Follow-up: runtime terminal/pickup activation is intentionally deferred to Steps 5–6.
 - `Step 2 — 2026-08-29`: Added explicit Dialogue/GameOver/Restarting states, restart intents, RunScoped ownership, restart cleanup/rebuild plumbing, placement/progress/checkpoint data, and New Game routing through Restarting. Terrain/player/enemies/HUD/combat effects are run-scoped; gameplay-only camera shake is gated while camera restoration remains safe outside gameplay. Added headless restart resource/cleanup coverage. Files changed: `src/main.rs`, `src/menu.rs`, `src/game.rs`, `src/tilemap.rs`, `src/progression.rs`, `PLAN.MD`. Baseline/final `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed; targeted restart test passed. Manual new-game/pause/combat/camera smoke check not run. Follow-up: terminal/pickup filtering and UI states are intentionally deferred to later steps.
 - `Step 3 — 2026-08-29`: Added owned active-dialogue state, validated request helper, state-scoped modal UI, and one-press dialogue advancement for Space/Enter/Numpad Enter/click. Dialogue renders speaker labels through the shared helper, removes itself on final advance, and is isolated from gameplay schedules. Added headless request/order, coalesced input/final close, Escape, UI cleanup/label, and gameplay-freeze tests. Files changed: `src/game_dialogue.rs`, `src/main.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted `cargo test game_dialogue`, `cargo test`, and `cargo check --all-targets` passed. Manual dialogue smoke check not run. Follow-up: terminals and pickups will request this modal in Steps 5–6.
+- `Step 4 — 2026-08-29`: Added centralized player health/invulnerability tuning, player body hitbox, generic accepted-damage messages, same-frame player-hit aggregation, gameplay-gated invulnerability/flash feedback, and a fixed health HUD with safe clamped ratio. Player health now starts at 100/100 and F3 shows its body hitbox. Files changed: `src/config.rs`, `src/game.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted health tests, `cargo test`, and `cargo check --all-targets` passed; manual HUD/F3 smoke check not run. Follow-up: death transition remains Step 8 and enemy attacks remain Step 7.

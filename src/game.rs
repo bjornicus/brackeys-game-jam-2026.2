@@ -9,6 +9,7 @@ use map_support::{
     progression::{CheckpointSnapshot, PlacementId, RunProgress},
     tilemap::{self, TerrainAtlas, TerrainTilemapPlugin},
 };
+use std::collections::HashSet;
 
 const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 const PAUSE_BUTTON_NORMAL: Color = Color::srgb(0.18, 0.25, 0.38);
@@ -38,12 +39,14 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<RunNeedsSpawn>()
         .add_message::<AttackFired>()
         .add_systems(PreStartup, setup_enemy_animations)
-        .add_message::<Damage>();
+        .add_message::<Damage>()
+        .add_message::<DamageApplied>();
     app.add_systems(
         OnEnter(GameState::Game),
         (
             setup_scene,
             setup_instructions,
+            setup_player_health_hud,
             spawn_character,
             setup_camera_shake,
             finish_run_setup,
@@ -75,6 +78,12 @@ pub fn game_plugin(app: &mut App) {
             toggle_collision_debug,
             draw_collision_debug,
         )
+            .chain()
+            .run_if(in_state(GameState::Game)),
+    )
+    .add_systems(
+        Update,
+        (tick_player_invulnerability, update_player_health_hud)
             .chain()
             .run_if(in_state(GameState::Game)),
     )
@@ -298,6 +307,17 @@ impl TeleportCooldown {
 #[derive(Component)]
 struct AttackHud;
 
+#[derive(Component)]
+struct PlayerHealthHud;
+
+#[derive(Component, Clone, Copy, Debug)]
+struct Invulnerable {
+    remaining: f32,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+struct PlayerHitFlash;
+
 #[derive(Component, Clone, Copy, Debug)]
 struct Hitbox(Collider);
 
@@ -310,6 +330,13 @@ struct Health {
 
 #[derive(Message, Clone, Copy, Debug)]
 struct Damage {
+    target: Entity,
+    amount: f32,
+}
+
+/// Emitted only after a damage message reduced a target's health.
+#[derive(Message, Clone, Copy, Debug)]
+struct DamageApplied {
     target: Entity,
     amount: f32,
 }
@@ -513,6 +540,7 @@ fn spawn_character(
     mut atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     spawn: Res<PlayerSpawn>,
     needs_spawn: Res<RunNeedsSpawn>,
+    combat_config: Res<CombatConfig>,
 ) {
     if !needs_spawn.0 {
         return;
@@ -580,6 +608,11 @@ fn spawn_character(
         Player,
         Faction::Player,
         PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
+        Hitbox(Collider::new(
+            combat_config.player_combat_hitbox_size,
+            Vec2::ZERO,
+        )),
+        default_player_health(&combat_config),
         Facing::Right,
         sprite,
         SpritesheetAnimation::new(idle[Facing::Right.animation_index()].clone()),
@@ -893,6 +926,28 @@ fn finish_enemy_deaths(
     }
 }
 
+fn setup_player_health_hud(mut commands: Commands, needs_spawn: Res<RunNeedsSpawn>) {
+    if !needs_spawn.0 {
+        return;
+    }
+    commands.spawn((
+        RunScoped,
+        PlayerHealthHud,
+        Text::new("Health: 100 / 100  [██████████]"),
+        TextFont {
+            font_size: FontSize::Px(20.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.9, 0.25, 0.25)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(12),
+            left: px(12),
+            ..default()
+        },
+    ));
+}
+
 fn setup_instructions(mut commands: Commands, needs_spawn: Res<RunNeedsSpawn>) {
     if !needs_spawn.0 {
         return;
@@ -931,12 +986,17 @@ fn toggle_collision_debug(
 
 fn draw_collision_debug(
     collision_debug: Res<CollisionDebug>,
-    player: Single<(&Transform, &PlayerCollider), With<Player>>,
+    player: Single<(&Transform, &PlayerCollider, &Hitbox), With<Player>>,
     enemies: Query<(&Transform, &EnemyCollider, &Hitbox), With<Enemy>>,
     mut gizmos: Gizmos,
 ) {
     if collision_debug.enabled {
-        let (transform, collider) = *player;
+        let (transform, collider, hitbox) = *player;
+        gizmos.rect_2d(
+            transform.translation.xy() + hitbox.0.offset,
+            hitbox.0.size,
+            Color::srgb(0.2, 0.9, 1.0),
+        );
         gizmos.rect_2d(
             transform.translation.xy() + collider.0.offset,
             collider.0.size,
@@ -1738,12 +1798,102 @@ fn move_projectiles(
     }
 }
 
-fn apply_damage(mut damage: MessageReader<Damage>, mut health: Query<&mut Health>) {
+fn default_player_health(combat_config: &CombatConfig) -> Health {
+    Health {
+        current: combat_config.player_maximum_health,
+        max: combat_config.player_maximum_health,
+    }
+}
+
+fn apply_damage(
+    mut commands: Commands,
+    mut damage: MessageReader<Damage>,
+    mut applied: Option<ResMut<Messages<DamageApplied>>>,
+    mut health: Query<&mut Health>,
+    players: Query<(), With<Player>>,
+    invulnerable: Query<(), With<Invulnerable>>,
+    combat_config: Option<Res<CombatConfig>>,
+) {
+    // Components inserted through Commands are deferred, so retain accepted player targets here.
+    let mut accepted_players = HashSet::new();
     for damage in damage.read() {
-        if let Ok(mut health) = health.get_mut(damage.target) {
-            health.current = (health.current - damage.amount).max(0.0);
+        if damage.amount <= 0.0 || invulnerable.get(damage.target).is_ok() {
+            continue;
+        }
+        let is_player = players.get(damage.target).is_ok();
+        if is_player && !accepted_players.insert(damage.target) {
+            continue;
+        }
+        let Ok(mut health) = health.get_mut(damage.target) else {
+            continue;
+        };
+        let before = health.current;
+        health.current = (health.current - damage.amount).clamp(0.0, health.max);
+        let applied_amount = before - health.current;
+        if applied_amount <= 0.0 {
+            continue;
+        }
+        if let Some(applied) = &mut applied {
+            applied.write(DamageApplied {
+                target: damage.target,
+                amount: applied_amount,
+            });
+        }
+        if is_player {
+            commands.entity(damage.target).insert((
+                Invulnerable {
+                    remaining: combat_config
+                        .as_deref()
+                        .unwrap_or(&CombatConfig::default())
+                        .player_invulnerability_duration,
+                },
+                PlayerHitFlash,
+            ));
         }
     }
+}
+
+fn tick_player_invulnerability(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut players: Query<(Entity, &mut Invulnerable, Option<&mut Sprite>), With<Player>>,
+) {
+    for (entity, mut invulnerable, sprite) in &mut players {
+        invulnerable.remaining -= time.delta_secs();
+        if invulnerable.remaining <= 0.0 {
+            commands
+                .entity(entity)
+                .remove::<(Invulnerable, PlayerHitFlash)>();
+            if let Some(mut sprite) = sprite {
+                sprite.color = Color::WHITE;
+            }
+        } else if let Some(mut sprite) = sprite {
+            sprite.color = Color::srgb(1.0, 0.45, 0.45);
+        }
+    }
+}
+
+fn player_health_ratio(health: Health) -> f32 {
+    if health.max <= 0.0 {
+        0.0
+    } else {
+        (health.current / health.max).clamp(0.0, 1.0)
+    }
+}
+
+fn update_player_health_hud(
+    player: Single<&Health, With<Player>>,
+    mut hud: Single<&mut Text, With<PlayerHealthHud>>,
+) {
+    let health = *player;
+    let filled = (player_health_ratio(*health) * 10.0).round() as usize;
+    hud.0 = format!(
+        "Health: {:.0} / {:.0}  [{}{}]",
+        health.current,
+        health.max,
+        "█".repeat(filled),
+        "·".repeat(10 - filled)
+    );
 }
 
 fn tick_lightning_visuals(
@@ -3237,6 +3387,150 @@ mod tests {
                 .translation
                 .y
                 > 0.0
+        );
+    }
+
+    #[derive(Resource, Default)]
+    struct AppliedDamageCount(u32);
+
+    fn count_applied_damage(
+        mut applied: MessageReader<DamageApplied>,
+        mut count: ResMut<AppliedDamageCount>,
+    ) {
+        count.0 += applied.read().count() as u32;
+    }
+
+    #[test]
+    fn player_health_damage_lifecycle_clamps_and_reports_only_real_hits() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<CombatConfig>()
+            .add_message::<Damage>()
+            .add_message::<DamageApplied>()
+            .init_resource::<AppliedDamageCount>()
+            .add_systems(
+                Update,
+                (
+                    apply_damage,
+                    tick_player_invulnerability,
+                    count_applied_damage,
+                )
+                    .chain(),
+            );
+        let starting_health = default_player_health(app.world().resource::<CombatConfig>());
+        assert_eq!(starting_health.current, 100.0);
+        assert_eq!(starting_health.max, 100.0);
+        let player = app.world_mut().spawn((Player, starting_health)).id();
+
+        for _ in 0..2 {
+            app.world_mut()
+                .resource_mut::<Messages<Damage>>()
+                .write(Damage {
+                    target: player,
+                    amount: 20.0,
+                });
+        }
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            80.0
+        );
+        assert!(app.world().entity(player).contains::<Invulnerable>());
+        assert_eq!(app.world().resource::<AppliedDamageCount>().0, 1);
+
+        // The invulnerability component blocks further messages until its gameplay timer expires.
+        app.world_mut()
+            .resource_mut::<Messages<Damage>>()
+            .write(Damage {
+                target: player,
+                amount: 20.0,
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            80.0
+        );
+        assert_eq!(app.world().resource::<AppliedDamageCount>().0, 1);
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.51));
+        assert!(app.world().resource::<Time>().delta_secs() >= 0.5);
+        app.world_mut().run_schedule(Update);
+        assert!(!app.world().entity(player).contains::<Invulnerable>());
+
+        app.world_mut()
+            .resource_mut::<Messages<Damage>>()
+            .write(Damage {
+                target: player,
+                amount: 20.0,
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            60.0
+        );
+        assert_eq!(app.world().resource::<AppliedDamageCount>().0, 2);
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.51));
+        app.world_mut().run_schedule(Update);
+        app.world_mut()
+            .resource_mut::<Messages<Damage>>()
+            .write(Damage {
+                target: player,
+                amount: 1_000.0,
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            0.0
+        );
+        assert_eq!(app.world().resource::<AppliedDamageCount>().0, 3);
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.51));
+        app.world_mut().run_schedule(Update);
+        for amount in [0.0, -1.0, 20.0] {
+            app.world_mut()
+                .resource_mut::<Messages<Damage>>()
+                .write(Damage {
+                    target: player,
+                    amount,
+                });
+        }
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            0.0
+        );
+        assert_eq!(app.world().resource::<AppliedDamageCount>().0, 3);
+    }
+
+    #[test]
+    fn health_clamps_and_bar_ratio_is_safe() {
+        assert_eq!(
+            player_health_ratio(Health {
+                current: 150.0,
+                max: 100.0
+            }),
+            1.0
+        );
+        assert_eq!(
+            player_health_ratio(Health {
+                current: -2.0,
+                max: 100.0
+            }),
+            0.0
+        );
+        assert_eq!(
+            player_health_ratio(Health {
+                current: 5.0,
+                max: 0.0
+            }),
+            0.0
         );
     }
 
