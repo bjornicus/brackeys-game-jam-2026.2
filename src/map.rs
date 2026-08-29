@@ -1,3 +1,4 @@
+use crate::progression::Skill;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -20,12 +21,15 @@ pub struct MapTile {
     pub tile: TerrainTile,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum MapEntityKind {
     Enemy,
+    Terminal { dialogue_id: String },
+    SkillPickup { skill: Skill },
+    ReinforcedArmorPickup,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MapEntity {
     pub x: i32,
     pub y: i32,
@@ -83,11 +87,10 @@ impl MapData {
         self.tiles.len() != original_len
     }
 
-    pub fn entity_at(&self, x: i32, y: i32) -> Option<MapEntity> {
+    pub fn entity_at(&self, x: i32, y: i32) -> Option<&MapEntity> {
         self.entities
             .iter()
             .find(|entry| entry.x == x && entry.y == y)
-            .copied()
     }
 
     pub fn can_place_entity(&self, x: i32, y: i32) -> bool {
@@ -100,7 +103,7 @@ impl MapData {
             .iter_mut()
             .find(|entry| entry.x == x && entry.y == y)
         {
-            let previous = *existing;
+            let previous = existing.clone();
             *existing = MapEntity { x, y, kind };
             Some(previous)
         } else {
@@ -192,13 +195,55 @@ mod tests {
 
         assert_eq!(loaded.tile_at(1, 2), Some(TerrainTile::Floor));
         assert_eq!(
-            loaded.entity_at(1, 2),
+            loaded.entity_at(1, 2).cloned(),
             Some(MapEntity {
                 x: 1,
                 y: 2,
                 kind: MapEntityKind::Enemy,
             })
         );
+    }
+
+    #[test]
+    fn every_entity_variant_round_trips_and_terminal_ids_are_owned() {
+        let kinds = [
+            MapEntityKind::Enemy,
+            MapEntityKind::Terminal {
+                dialogue_id: "terminal_intro".into(),
+            },
+            MapEntityKind::SkillPickup {
+                skill: Skill::Projectile,
+            },
+            MapEntityKind::SkillPickup { skill: Skill::Stun },
+            MapEntityKind::SkillPickup {
+                skill: Skill::Teleport,
+            },
+            MapEntityKind::ReinforcedArmorPickup,
+        ];
+        let mut map = MapData::default();
+        for (x, kind) in kinds.into_iter().enumerate() {
+            map.set(x as i32, 0, TerrainTile::Floor);
+            map.place_entity(x as i32, 0, kind);
+        }
+        let encoded = ron::ser::to_string(&map).unwrap();
+        let decoded: MapData = ron::de::from_str(&encoded).unwrap();
+        assert_eq!(decoded.entities, map.entities);
+        let terminal = decoded.entity_at(1, 0).unwrap().clone();
+        assert_eq!(
+            terminal.kind,
+            MapEntityKind::Terminal {
+                dialogue_id: "terminal_intro".into()
+            }
+        );
+    }
+
+    #[test]
+    fn old_enemy_only_ron_remains_compatible() {
+        let map: MapData = ron::de::from_str(
+            "(tiles: [(x: 0, y: 0, tile: Floor)], entities: [(x: 0, y: 0, kind: Enemy)])",
+        )
+        .unwrap();
+        assert_eq!(map.entity_at(0, 0).unwrap().kind, MapEntityKind::Enemy);
     }
 
     #[test]
@@ -217,7 +262,7 @@ mod tests {
         );
         assert_eq!(map.entities.len(), 1);
         assert_eq!(
-            map.entity_at(3, 4),
+            map.entity_at(3, 4).cloned(),
             Some(MapEntity {
                 x: 3,
                 y: 4,
@@ -235,7 +280,7 @@ mod tests {
         assert!(map.remove(0, 0));
         assert_eq!(map.tile_at(0, 0), None);
         assert_eq!(
-            map.entity_at(0, 0),
+            map.entity_at(0, 0).cloned(),
             Some(MapEntity {
                 x: 0,
                 y: 0,
@@ -271,7 +316,7 @@ mod tests {
         assert!(!map.try_place_entity(2, 0, MapEntityKind::Enemy));
         assert_eq!(map.entities.len(), 1);
         assert_eq!(
-            map.entity_at(0, 0).map(|entity| entity.kind),
+            map.entity_at(0, 0).map(|entity| entity.kind.clone()),
             Some(MapEntityKind::Enemy)
         );
     }

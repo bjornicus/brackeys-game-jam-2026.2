@@ -25,9 +25,9 @@ When idle, simultaneous gameplay input resolves in this order: stun, teleport, f
 
 ## Map editor
 
-Run `cargo run --bin map_editor -- <map-name>`. Palette keys are `1` floor, `2` wall, and `3` enemy. In terrain modes, left click paints and right click removes terrain. In enemy mode, left click places an enemy only on an explicit floor tile and right click removes only the enemy marker. Use Ctrl+S to save. Middle-drag pans and the wheel zooms.
+Run `cargo run --bin map_editor -- <map-name>`. Palette keys are `1` floor, `2` wall, `3` enemy, `4` terminal, `5` projectile pickup, `6` stun pickup, `7` teleport pickup, and `8` Reinforced Armor. In terminal mode, `[` and `]` cycle the sorted story dialogue IDs shown at the top of the editor. In terrain modes, left click paints and right click removes terrain. In every entity mode, left click places/replaces an entity only on an explicit floor tile and right click removes only the entity marker. Use Ctrl+S to save. The editor rejects missing terminal dialogue IDs when loading or saving. Middle-drag pans and the wheel zooms.
 
-Maps are sparse RON files under `assets/maps/`. Enemy placements are independent of terrain; removing or painting terrain does not silently remove an entity.
+Markers are colored and labeled: red **ENEMY**, blue **TERM**, yellow **SHOT**, purple **STUN**, teal **WARP**, and green **ARMOR**. Maps are sparse RON files under `assets/maps/`; entity placements are independent of terrain, so removing or painting terrain does not silently remove an entity.
 
 ## Story dialogue
 

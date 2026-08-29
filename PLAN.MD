@@ -182,16 +182,16 @@ Record a defeated enemy when it first enters `Dying`, and record a pickup before
 
 **Goal:** Persist terminals and all pickup types and make them editable, without runtime activation yet.
 
-- [ ] Extend `MapEntityKind` to the intended variants above. Derive `Clone`, serialization, equality, and debugging traits; remove `Copy` where the terminal string prevents it.
-- [ ] Update `MapData::entity_at`, placement/replacement helpers, enemy spawning, tests, and editor matching to clone or borrow explicitly. Do not introduce duplicate entity records on one tile.
-- [ ] Keep old RON compatibility: maps containing only `Enemy` entities and maps lacking `entities` must still load.
-- [ ] In the editor add palette choices/hotkeys: `1` floor, `2` wall, `3` enemy, `4` terminal, `5` projectile pickup, `6` stun pickup, `7` teleport pickup, `8` Reinforced Armor.
-- [ ] Load `assets/dialogue/story.ron` in the editor. While terminal mode is selected, use `[` and `]` to cycle through sorted dialogue IDs and display the current ID in the palette/help text.
-- [ ] Give every entity kind a visually distinct marker. Colored geometric sprites plus short text labels are sufficient; production art is out of scope.
-- [ ] Preserve current layer behavior: entity left-click places/replaces only on explicit floor, entity right-click removes only the entity, and terrain editing remains independent.
-- [ ] Add at least three terminals and one of every pickup type to valid, reachable, non-player-start floor tiles in `assets/maps/initial.ron`. Avoid replacing existing enemies unless necessary.
-- [ ] Validate terminal references when loading/saving in the editor. Show an actionable error containing the missing dialogue ID rather than silently saving a broken reference.
-- [ ] Update `README.md` editor controls and marker meanings.
+- [x] Extend `MapEntityKind` to the intended variants above. Derive `Clone`, serialization, equality, and debugging traits; remove `Copy` where the terminal string prevents it.
+- [x] Update `MapData::entity_at`, placement/replacement helpers, enemy spawning, tests, and editor matching to clone or borrow explicitly. Do not introduce duplicate entity records on one tile.
+- [x] Keep old RON compatibility: maps containing only `Enemy` entities and maps lacking `entities` must still load.
+- [x] In the editor add palette choices/hotkeys: `1` floor, `2` wall, `3` enemy, `4` terminal, `5` projectile pickup, `6` stun pickup, `7` teleport pickup, `8` Reinforced Armor.
+- [x] Load `assets/dialogue/story.ron` in the editor. While terminal mode is selected, use `[` and `]` to cycle through sorted dialogue IDs and display the current ID in the palette/help text.
+- [x] Give every entity kind a visually distinct marker. Colored geometric sprites plus short text labels are sufficient; production art is out of scope.
+- [x] Preserve current layer behavior: entity left-click places/replaces only on explicit floor, entity right-click removes only the entity, and terrain editing remains independent.
+- [x] Add at least three terminals and one of every pickup type to valid, reachable, non-player-start floor tiles in `assets/maps/initial.ron`. Avoid replacing existing enemies unless necessary.
+- [x] Validate terminal references when loading/saving in the editor. Show an actionable error containing the missing dialogue ID rather than silently saving a broken reference.
+- [x] Update `README.md` editor controls and marker meanings.
 
 **Automated acceptance:** Tests cover old map compatibility, round-trip of every new variant, same-tile replacement, floor-only placement, terminal string cloning, and valid/invalid terminal catalog references.
 
@@ -404,3 +404,4 @@ Append one entry per completed step using this format:
 
 - `Step N — YYYY-MM-DD`: summary; files changed; baseline/final commands and results; manual checks run or explicitly not run; known follow-up.
 - `Step 0 — 2026-08-29`: Added shared serializable progression skills and a validated, traversal-safe dialogue catalog loader with ordered-line, validation, malformed-RON, label, and filename tests. Added three editable placeholder conversations and documented the RON schema. Files changed: `src/progression.rs`, `src/dialogue.rs`, `src/lib.rs`, `assets/dialogue/story.ron`, `README.md`, `PLAN.MD`. Baseline and final `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed; targeted `cargo test dialogue` passed. Manual story-file readability check not run.
+- `Step 1 — 2026-08-29`: Extended map entities with terminal dialogue IDs, skill/armor pickups, and clone-safe placement helpers; updated gameplay enemy filtering and rebuilt the editor palette, labels, terminal dialogue-ID cycling, and load/save validation. Added initial-map placements and editor/map tests; updated README. Files changed: `src/map.rs`, `src/game.rs`, `src/bin/map_editor.rs`, `assets/maps/initial.ron`, `README.md`, `PLAN.MD`. Baseline/final `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual editor smoke check not run. Follow-up: runtime terminal/pickup activation is intentionally deferred to Steps 5–6.

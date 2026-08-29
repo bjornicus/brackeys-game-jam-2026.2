@@ -473,7 +473,7 @@ fn spawn_character(
     ));
 }
 
-fn enemy_spawn_position(entity: map::MapEntity) -> Vec2 {
+fn enemy_spawn_position(entity: &map::MapEntity) -> Vec2 {
     Vec2::new(
         entity.x as f32 * map::TILE_SIZE,
         entity.y as f32 * map::TILE_SIZE,
@@ -495,7 +495,7 @@ fn spawn_enemies_from_map(
     };
 
     for placement in &game_map.0.entities {
-        if placement.kind != map::MapEntityKind::Enemy {
+        if !matches!(placement.kind, map::MapEntityKind::Enemy) {
             continue;
         }
         commands.spawn((
@@ -513,7 +513,7 @@ fn spawn_enemies_from_map(
                 attack_distance: combat_config.enemy_attack_distance,
             },
             SpritesheetAnimation::new(animations.idle.clone()),
-            Transform::from_translation(enemy_spawn_position(*placement).extend(2.0)),
+            Transform::from_translation(enemy_spawn_position(placement).extend(2.0)),
         ));
     }
     spawned.0 = true;

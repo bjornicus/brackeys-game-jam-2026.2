@@ -3,7 +3,9 @@ use bevy::{
     prelude::*,
 };
 use map_support::{
+    dialogue::{DialogueCatalog, load_dialogue_catalog},
     map::{self, MapData, MapEntityKind, TILE_SIZE, TerrainTile},
+    progression::Skill,
     tilemap::{self, TerrainAtlas, TerrainMapTile, TerrainTilemapPlugin},
 };
 
@@ -16,29 +18,61 @@ struct EditorMap {
     name: String,
     map: MapData,
     selected: PaletteSelection,
+    dialogue_ids: Vec<String>,
+    selected_dialogue: usize,
+    catalogue_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PaletteSelection {
+    Terrain(TerrainTile),
+    Entity(EntityPalette),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PaletteSelection {
-    Terrain(TerrainTile),
+enum EntityPalette {
     Enemy,
+    Terminal,
+    Projectile,
+    Stun,
+    Teleport,
+    ReinforcedArmor,
+}
+
+impl EntityPalette {
+    const ALL: [(Self, &'static str, KeyCode); 6] = [
+        (Self::Enemy, "Enemy", KeyCode::Digit3),
+        (Self::Terminal, "Terminal", KeyCode::Digit4),
+        (Self::Projectile, "Projectile", KeyCode::Digit5),
+        (Self::Stun, "Stun", KeyCode::Digit6),
+        (Self::Teleport, "Teleport", KeyCode::Digit7),
+        (Self::ReinforcedArmor, "Armor", KeyCode::Digit8),
+    ];
+
+    fn kind(self, dialogue_id: Option<&str>) -> Option<MapEntityKind> {
+        Some(match self {
+            Self::Enemy => MapEntityKind::Enemy,
+            Self::Terminal => MapEntityKind::Terminal {
+                dialogue_id: dialogue_id?.to_owned(),
+            },
+            Self::Projectile => MapEntityKind::SkillPickup {
+                skill: Skill::Projectile,
+            },
+            Self::Stun => MapEntityKind::SkillPickup { skill: Skill::Stun },
+            Self::Teleport => MapEntityKind::SkillPickup {
+                skill: Skill::Teleport,
+            },
+            Self::ReinforcedArmor => MapEntityKind::ReinforcedArmorPickup,
+        })
+    }
 }
 
 #[derive(Component)]
 struct PaletteButton(PaletteSelection);
-
 #[derive(Component)]
 struct EntityMarker;
-
-#[derive(Resource)]
-struct EnemyPlaceholderAtlas {
-    image: Handle<Image>,
-    layout: Handle<TextureAtlasLayout>,
-}
-
-const ENEMY_PLACEHOLDER_CELL_SIZE: u32 = 64;
-const ENEMY_PLACEHOLDER_COLUMNS: u32 = 4;
-const ENEMY_PLACEHOLDER_ROWS: u32 = 4;
+#[derive(Component)]
+struct PaletteHelp;
 
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "initial".into());
@@ -46,18 +80,31 @@ fn main() {
         eprintln!("Starting a new map '{name}': {error}");
         MapData::default()
     });
+    let (dialogue_ids, catalogue_error) = match load_dialogue_catalog("story") {
+        Ok(catalog) => {
+            let ids = catalogue_ids(&catalog);
+            let error = validate_terminal_references(&map, &ids).err();
+            (ids, error)
+        }
+        Err(error) => (
+            Vec::new(),
+            Some(format!("Could not load assets/dialogue/story.ron: {error}")),
+        ),
+    };
 
     App::new()
         .insert_resource(EditorMap {
             name,
             map,
             selected: PaletteSelection::Terrain(TerrainTile::Floor),
+            dialogue_ids,
+            selected_dialogue: 0,
+            catalogue_error,
         })
         .add_plugins((
             DefaultPlugins.set(ImagePlugin::default_nearest()),
             TerrainTilemapPlugin,
         ))
-        .add_systems(PreStartup, initialize_enemy_placeholder_atlas)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -66,6 +113,7 @@ fn main() {
                 palette_button_interaction,
                 paint_map,
                 save_map,
+                update_palette_help,
                 zoom_camera,
                 pan_camera,
             ),
@@ -73,32 +121,14 @@ fn main() {
         .run();
 }
 
-fn initialize_enemy_placeholder_atlas(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
-) {
-    commands.insert_resource(EnemyPlaceholderAtlas {
-        image: asset_server.load("sprites/enemy_placeholder.png"),
-        layout: layouts.add(TextureAtlasLayout::from_grid(
-            UVec2::splat(ENEMY_PLACEHOLDER_CELL_SIZE),
-            ENEMY_PLACEHOLDER_COLUMNS,
-            ENEMY_PLACEHOLDER_ROWS,
-            None,
-            None,
-        )),
-    });
+fn catalogue_ids(catalog: &DialogueCatalog) -> Vec<String> {
+    catalog.conversations.keys().cloned().collect()
 }
 
-fn setup(
-    mut commands: Commands,
-    atlas: Res<TerrainAtlas>,
-    enemy_atlas: Res<EnemyPlaceholderAtlas>,
-    editor_map: Res<EditorMap>,
-) {
+fn setup(mut commands: Commands, atlas: Res<TerrainAtlas>, editor_map: Res<EditorMap>) {
     commands.spawn(Camera2d);
     tilemap::spawn_map(&mut commands, &atlas, &editor_map.map);
-    spawn_entity_markers(&mut commands, &editor_map.map, &enemy_atlas);
+    spawn_entity_markers(&mut commands, &editor_map.map);
 
     commands.spawn((
         Node {
@@ -108,66 +138,31 @@ fn setup(
             width: percent(100),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            column_gap: px(8),
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: px(6),
+            row_gap: px(6),
             ..default()
         },
         children![
-            (
-                Button,
-                palette_button_node(),
-                BackgroundColor(SELECTED_BUTTON),
-                PaletteButton(PaletteSelection::Terrain(TerrainTile::Floor)),
-                children![
-                    (
-                        ImageNode::from_atlas_image(
-                            atlas.image(),
-                            TextureAtlas {
-                                layout: atlas.layout(),
-                                index: 0
-                            }
-                        ),
-                        palette_icon_node(),
-                    ),
-                    palette_hotkey_label("1"),
-                ]
+            palette_button(PaletteSelection::Terrain(TerrainTile::Floor), "1 Floor"),
+            palette_button(PaletteSelection::Terrain(TerrainTile::Wall), "2 Wall"),
+            palette_button(PaletteSelection::Entity(EntityPalette::Enemy), "3 Enemy"),
+            palette_button(
+                PaletteSelection::Entity(EntityPalette::Terminal),
+                "4 Terminal"
             ),
-            (
-                Button,
-                palette_button_node(),
-                BackgroundColor(NORMAL_BUTTON),
-                PaletteButton(PaletteSelection::Terrain(TerrainTile::Wall)),
-                children![
-                    (
-                        ImageNode::from_atlas_image(
-                            atlas.image(),
-                            TextureAtlas {
-                                layout: atlas.layout(),
-                                index: 1
-                            }
-                        ),
-                        palette_icon_node(),
-                    ),
-                    palette_hotkey_label("2"),
-                ]
+            palette_button(
+                PaletteSelection::Entity(EntityPalette::Projectile),
+                "5 Projectile"
             ),
-            (
-                Button,
-                palette_button_node(),
-                BackgroundColor(NORMAL_BUTTON),
-                PaletteButton(PaletteSelection::Enemy),
-                children![
-                    (
-                        ImageNode::from_atlas_image(
-                            enemy_atlas.image.clone(),
-                            TextureAtlas {
-                                layout: enemy_atlas.layout.clone(),
-                                index: 0,
-                            },
-                        ),
-                        enemy_icon_node(),
-                    ),
-                    palette_hotkey_label("3"),
-                ]
+            palette_button(PaletteSelection::Entity(EntityPalette::Stun), "6 Stun"),
+            palette_button(
+                PaletteSelection::Entity(EntityPalette::Teleport),
+                "7 Teleport"
+            ),
+            palette_button(
+                PaletteSelection::Entity(EntityPalette::ReinforcedArmor),
+                "8 Armor"
             ),
             (
                 Text::new("Ctrl+S save"),
@@ -175,16 +170,53 @@ fn setup(
                     font_size: FontSize::Px(14.0),
                     ..default()
                 },
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.75)),
+                TextColor(Color::WHITE),
             ),
         ],
     ));
+    commands.spawn((
+        PaletteHelp,
+        Text::new(""),
+        TextFont {
+            font_size: FontSize::Px(16.0),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(12),
+            left: px(12),
+            ..default()
+        },
+    ));
+}
+
+fn palette_button(selection: PaletteSelection, label: &'static str) -> impl Bundle {
+    (
+        Button,
+        Node {
+            width: px(90),
+            height: px(36),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(NORMAL_BUTTON),
+        PaletteButton(selection),
+        children![(
+            Text::new(label),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        )],
+    )
 }
 
 fn redraw_map(
     commands: &mut Commands,
     atlas: &TerrainAtlas,
-    enemy_atlas: &EnemyPlaceholderAtlas,
     map: &MapData,
     tiles: &Query<Entity, With<TerrainMapTile>>,
     markers: &Query<Entity, With<EntityMarker>>,
@@ -196,83 +228,50 @@ fn redraw_map(
         commands.entity(entity).despawn();
     }
     tilemap::spawn_map(commands, atlas, map);
-    spawn_entity_markers(commands, map, enemy_atlas);
+    spawn_entity_markers(commands, map);
 }
 
-fn spawn_entity_markers(
-    commands: &mut Commands,
-    map: &MapData,
-    enemy_atlas: &EnemyPlaceholderAtlas,
-) {
+fn spawn_entity_markers(commands: &mut Commands, map: &MapData) {
     for entity in &map.entities {
-        match entity.kind {
-            MapEntityKind::Enemy => {
-                commands.spawn((
-                    EntityMarker,
-                    Sprite {
-                        image: enemy_atlas.image.clone(),
-                        texture_atlas: Some(TextureAtlas {
-                            layout: enemy_atlas.layout.clone(),
-                            index: 0,
-                        }),
-                        custom_size: Some(Vec2::splat(TILE_SIZE * 0.45)),
-                        ..default()
-                    },
-                    Transform::from_xyz(
-                        entity.x as f32 * TILE_SIZE,
-                        entity.y as f32 * TILE_SIZE,
-                        1.0,
-                    ),
-                ));
-            }
-        }
+        let (color, label) = marker_style(&entity.kind);
+        commands.spawn((
+            EntityMarker,
+            Sprite {
+                color,
+                custom_size: Some(Vec2::splat(TILE_SIZE * 0.52)),
+                ..default()
+            },
+            Transform::from_xyz(
+                entity.x as f32 * TILE_SIZE,
+                entity.y as f32 * TILE_SIZE,
+                1.0,
+            ),
+            children![(
+                Text2d::new(label),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                Transform::from_xyz(0.0, 0.0, 1.0),
+            )],
+        ));
     }
 }
 
-fn palette_button_node() -> Node {
-    Node {
-        width: px(56),
-        height: px(56),
-        padding: UiRect::all(px(4)),
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::Center,
-        overflow: Overflow::clip(),
-        ..default()
+fn marker_style(kind: &MapEntityKind) -> (Color, &'static str) {
+    match kind {
+        MapEntityKind::Enemy => (Color::srgb(0.75, 0.12, 0.12), "ENEMY"),
+        MapEntityKind::Terminal { .. } => (Color::srgb(0.15, 0.55, 0.9), "TERM"),
+        MapEntityKind::SkillPickup {
+            skill: Skill::Projectile,
+        } => (Color::srgb(0.9, 0.7, 0.1), "SHOT"),
+        MapEntityKind::SkillPickup { skill: Skill::Stun } => (Color::srgb(0.65, 0.25, 0.9), "STUN"),
+        MapEntityKind::SkillPickup {
+            skill: Skill::Teleport,
+        } => (Color::srgb(0.1, 0.8, 0.7), "WARP"),
+        MapEntityKind::ReinforcedArmorPickup => (Color::srgb(0.45, 0.75, 0.45), "ARMOR"),
     }
-}
-
-fn palette_icon_node() -> Node {
-    Node {
-        width: percent(100),
-        height: percent(100),
-        ..default()
-    }
-}
-
-fn enemy_icon_node() -> Node {
-    Node {
-        width: percent(70),
-        height: percent(70),
-        ..default()
-    }
-}
-
-fn palette_hotkey_label(label: &'static str) -> impl Bundle {
-    (
-        Text::new(label),
-        TextFont {
-            font_size: FontSize::Px(18.0),
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        TextShadow::default(),
-        Node {
-            position_type: PositionType::Absolute,
-            right: px(5),
-            bottom: px(1),
-            ..default()
-        },
-    )
 }
 
 fn palette_input(keyboard: Res<ButtonInput<KeyCode>>, mut editor_map: ResMut<EditorMap>) {
@@ -282,8 +281,23 @@ fn palette_input(keyboard: Res<ButtonInput<KeyCode>>, mut editor_map: ResMut<Edi
     if keyboard.just_pressed(KeyCode::Digit2) {
         editor_map.selected = PaletteSelection::Terrain(TerrainTile::Wall);
     }
-    if keyboard.just_pressed(KeyCode::Digit3) {
-        editor_map.selected = PaletteSelection::Enemy;
+    for (entity, _, key) in EntityPalette::ALL {
+        if keyboard.just_pressed(key) {
+            editor_map.selected = PaletteSelection::Entity(entity);
+        }
+    }
+    if editor_map.selected == PaletteSelection::Entity(EntityPalette::Terminal)
+        && !editor_map.dialogue_ids.is_empty()
+    {
+        if keyboard.just_pressed(KeyCode::BracketLeft) {
+            editor_map.selected_dialogue =
+                (editor_map.selected_dialogue + editor_map.dialogue_ids.len() - 1)
+                    % editor_map.dialogue_ids.len();
+        }
+        if keyboard.just_pressed(KeyCode::BracketRight) {
+            editor_map.selected_dialogue =
+                (editor_map.selected_dialogue + 1) % editor_map.dialogue_ids.len();
+        }
     }
 }
 
@@ -291,11 +305,11 @@ fn palette_button_interaction(
     mut buttons: Query<(&Interaction, &PaletteButton, &mut BackgroundColor), With<Button>>,
     mut editor_map: ResMut<EditorMap>,
 ) {
-    for (interaction, palette_button, mut color) in &mut buttons {
+    for (interaction, button, mut color) in &mut buttons {
         if *interaction == Interaction::Pressed {
-            editor_map.selected = palette_button.0;
+            editor_map.selected = button.0.clone();
         }
-        *color = if editor_map.selected == palette_button.0 {
+        *color = if editor_map.selected == button.0 {
             SELECTED_BUTTON.into()
         } else if *interaction == Interaction::Hovered {
             HOVERED_BUTTON.into()
@@ -310,16 +324,13 @@ fn paint_map(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     atlas: Res<TerrainAtlas>,
-    enemy_atlas: Res<EnemyPlaceholderAtlas>,
     mut commands: Commands,
     mut editor_map: ResMut<EditorMap>,
     tiles: Query<Entity, With<TerrainMapTile>>,
     markers: Query<Entity, With<EntityMarker>>,
     palette_buttons: Query<&Interaction, With<PaletteButton>>,
 ) {
-    if palette_buttons
-        .iter()
-        .any(|interaction| *interaction == Interaction::Pressed)
+    if palette_buttons.iter().any(|i| *i == Interaction::Pressed)
         || (!mouse.just_pressed(MouseButton::Left) && !mouse.just_pressed(MouseButton::Right))
     {
         return;
@@ -327,37 +338,60 @@ fn paint_map(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    let Ok(world_position) = camera.0.viewport_to_world_2d(camera.1, cursor) else {
+    let Ok(position) = camera.0.viewport_to_world_2d(camera.1, cursor) else {
         return;
     };
-    let x = (world_position.x / TILE_SIZE).round() as i32;
-    let y = (world_position.y / TILE_SIZE).round() as i32;
-
-    match (editor_map.selected, mouse.just_pressed(MouseButton::Left)) {
-        (PaletteSelection::Terrain(selected), true) => editor_map.map.set(x, y, selected),
+    let (x, y) = (
+        (position.x / TILE_SIZE).round() as i32,
+        (position.y / TILE_SIZE).round() as i32,
+    );
+    let selected = editor_map.selected.clone();
+    match (&selected, mouse.just_pressed(MouseButton::Left)) {
+        (PaletteSelection::Terrain(tile), true) => editor_map.map.set(x, y, *tile),
         (PaletteSelection::Terrain(_), false) => {
             editor_map.map.remove(x, y);
         }
-        (PaletteSelection::Enemy, true) => {
-            editor_map.map.try_place_entity(x, y, MapEntityKind::Enemy);
+        (PaletteSelection::Entity(entity), true) => {
+            let dialogue_id = editor_map
+                .dialogue_ids
+                .get(editor_map.selected_dialogue)
+                .map(String::as_str);
+            if let Some(kind) = entity.kind(dialogue_id) {
+                editor_map.map.try_place_entity(x, y, kind);
+            }
         }
-        (PaletteSelection::Enemy, false) => {
+        (PaletteSelection::Entity(_), false) => {
             editor_map.map.remove_entity(x, y);
         }
     }
+    redraw_map(&mut commands, &atlas, &editor_map.map, &tiles, &markers);
+}
 
-    redraw_map(
-        &mut commands,
-        &atlas,
-        &enemy_atlas,
-        &editor_map.map,
-        &tiles,
-        &markers,
-    );
+fn validate_terminal_references(map: &MapData, dialogue_ids: &[String]) -> Result<(), String> {
+    for entity in &map.entities {
+        if let MapEntityKind::Terminal { dialogue_id } = &entity.kind {
+            if !dialogue_ids.iter().any(|id| id == dialogue_id) {
+                return Err(format!(
+                    "terminal at ({}, {}) references missing dialogue ID '{dialogue_id}'",
+                    entity.x, entity.y
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn save_map(keyboard: Res<ButtonInput<KeyCode>>, editor_map: Res<EditorMap>) {
     if keyboard.pressed(KeyCode::ControlLeft) && keyboard.just_pressed(KeyCode::KeyS) {
+        if let Some(error) = &editor_map.catalogue_error {
+            error!("Cannot save: {error}");
+            return;
+        }
+        if let Err(error) = validate_terminal_references(&editor_map.map, &editor_map.dialogue_ids)
+        {
+            error!("Cannot save: {error}");
+            return;
+        }
         match map::save_map(&editor_map.name, &editor_map.map) {
             Ok(()) => info!("Saved map '{}'", editor_map.name),
             Err(error) => error!("Could not save map '{}': {error}", editor_map.name),
@@ -365,38 +399,79 @@ fn save_map(keyboard: Res<ButtonInput<KeyCode>>, editor_map: Res<EditorMap>) {
     }
 }
 
+fn update_palette_help(editor_map: Res<EditorMap>, mut text: Single<&mut Text, With<PaletteHelp>>) {
+    text.0 = match &editor_map.catalogue_error {
+        Some(error) => error.clone(),
+        None if editor_map.selected == PaletteSelection::Entity(EntityPalette::Terminal) => format!(
+            "Terminal dialogue: {}  ([ / ] to cycle)",
+            editor_map.dialogue_ids.get(editor_map.selected_dialogue).map(String::as_str).unwrap_or("no valid dialogue IDs"),
+        ),
+        None => "Entity placement requires an explicit floor tile. Right click removes only entities in entity modes.".into(),
+    };
+}
+
 fn pan_camera(
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<&Window>,
-    mut mouse_motion_events: MessageReader<MouseMotion>,
+    mut events: MessageReader<MouseMotion>,
     mut camera: Single<(&mut Transform, &Projection), With<Camera2d>>,
 ) {
     if !mouse.pressed(MouseButton::Middle) {
-        mouse_motion_events.clear();
+        events.clear();
         return;
     }
-
     let scale = match camera.1 {
         Projection::Orthographic(projection) => projection.scale,
         _ => 1.0,
     };
-    // MouseMotion uses physical pixels while the camera viewport uses logical pixels.
-    // Convert between them so panning stays one-to-one at any display scale factor.
-    let logical_scale = scale / window.scale_factor() as f32;
-    for event in mouse_motion_events.read() {
-        // Keep the map under the cursor: screen Y grows downward, world Y grows upward.
-        let pan_delta = Vec2::new(-event.delta.x, event.delta.y) * logical_scale;
-        camera.0.translation += pan_delta.extend(0.0);
+    for event in events.read() {
+        camera.0.translation += Vec2::new(-event.delta.x, event.delta.y).extend(0.0) * scale
+            / window.scale_factor() as f32;
     }
 }
 
 fn zoom_camera(
-    mut mouse_wheel_events: MessageReader<MouseWheel>,
+    mut events: MessageReader<MouseWheel>,
     mut camera: Single<&mut Projection, With<Camera2d>>,
 ) {
-    for event in mouse_wheel_events.read() {
+    for event in events.read() {
         if let Projection::Orthographic(projection) = &mut **camera {
             projection.scale = (projection.scale - event.y * 0.1).clamp(0.25, 4.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_references_require_catalogue_id() {
+        let map = MapData {
+            tiles: vec![],
+            entities: vec![map_support::map::MapEntity {
+                x: 1,
+                y: 2,
+                kind: MapEntityKind::Terminal {
+                    dialogue_id: "missing".into(),
+                },
+            }],
+        };
+        assert!(
+            validate_terminal_references(&map, &["known".into()])
+                .unwrap_err()
+                .contains("missing dialogue ID 'missing'")
+        );
+        assert!(validate_terminal_references(&map, &["missing".into()]).is_ok());
+    }
+
+    #[test]
+    fn terminal_palette_uses_selected_human_readable_id() {
+        assert_eq!(
+            EntityPalette::Terminal.kind(Some("terminal_intro")),
+            Some(MapEntityKind::Terminal {
+                dialogue_id: "terminal_intro".into()
+            })
+        );
     }
 }

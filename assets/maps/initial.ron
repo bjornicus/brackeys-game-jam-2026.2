@@ -507,5 +507,40 @@
             y: 5,
             kind: Enemy,
         ),
+        (
+            x: -4,
+            y: -1,
+            kind: Terminal(dialogue_id: "terminal_intro"),
+        ),
+        (
+            x: 0,
+            y: -1,
+            kind: Terminal(dialogue_id: "terminal_signal"),
+        ),
+        (
+            x: 1,
+            y: 0,
+            kind: Terminal(dialogue_id: "terminal_crossroads"),
+        ),
+        (
+            x: -1,
+            y: -2,
+            kind: SkillPickup(skill: Projectile),
+        ),
+        (
+            x: -3,
+            y: -1,
+            kind: SkillPickup(skill: Stun),
+        ),
+        (
+            x: 2,
+            y: -1,
+            kind: SkillPickup(skill: Teleport),
+        ),
+        (
+            x: 0,
+            y: 1,
+            kind: ReinforcedArmorPickup,
+        ),
     ],
 )
