@@ -45,6 +45,10 @@ impl Aabb {
             && self.max.y > other.min.y
     }
 
+    pub fn closest_point(self, point: Vec2) -> Vec2 {
+        point.clamp(self.min, self.max)
+    }
+
     pub fn tile(x: i32, y: i32) -> Self {
         let half_tile = TILE_SIZE / 2.0;
         let center = Vec2::new(x as f32 * TILE_SIZE, y as f32 * TILE_SIZE);
@@ -92,6 +96,11 @@ pub fn segment_first_aabb_intersection(start: Vec2, end: Vec2, aabb: Aabb) -> Op
     }
 
     Some(t_min.max(0.0))
+}
+
+/// Returns whether a circle overlaps an AABB. Tangential contact counts as a hit.
+pub fn circle_intersects_aabb(center: Vec2, radius: f32, aabb: Aabb) -> bool {
+    center.distance_squared(aabb.closest_point(center)) <= radius * radius
 }
 
 pub fn terrain_blocks_segment(start: Vec2, end: Vec2, map: &MapData) -> bool {
@@ -280,6 +289,13 @@ mod tests {
         );
 
         assert_eq!(moved, Vec2::new(0.0, TILE_SIZE));
+    }
+
+    #[test]
+    fn circle_aabb_includes_boundary_contact() {
+        let aabb = Aabb::from_center_size(Vec2::ZERO, Vec2::splat(20.0));
+        assert!(circle_intersects_aabb(Vec2::new(16.0, 0.0), 6.0, aabb));
+        assert!(!circle_intersects_aabb(Vec2::new(16.1, 0.0), 6.0, aabb));
     }
 
     #[test]

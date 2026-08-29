@@ -25,13 +25,19 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<CursorWorld>()
         .init_resource::<AttackFeedback>()
         .init_resource::<TeleportCooldown>()
+        .init_resource::<CameraShakeConfig>()
         .init_resource::<EnemiesSpawned>()
         .add_message::<AttackFired>()
         .add_systems(PreStartup, setup_enemy_animations)
         .add_message::<Damage>();
     app.add_systems(
         OnEnter(GameState::Game),
-        (setup_scene, setup_instructions, spawn_character),
+        (
+            setup_scene,
+            setup_instructions,
+            spawn_character,
+            setup_camera_shake,
+        ),
     )
     .add_systems(OnEnter(GameState::Paused), pause_menu_setup)
     .add_systems(
@@ -63,6 +69,15 @@ pub fn game_plugin(app: &mut App) {
     .add_systems(
         Update,
         (
+            cast_stun.before(control_character),
+            tick_shockwaves.after(cast_stun),
+            draw_shockwaves,
+        )
+            .run_if(in_state(GameState::Game)),
+    )
+    .add_systems(
+        Update,
+        (
             spawn_enemies_from_map,
             attach_enemy_sprites,
             spawn_enemy_health_bars,
@@ -78,7 +93,10 @@ pub fn game_plugin(app: &mut App) {
     .add_systems(
         Update,
         (pause_menu_action, pause_menu_button_system).run_if(in_state(GameState::Paused)),
-    );
+    )
+    // Restore before cursor conversion/gameplay, then shake only for rendering.
+    .add_systems(PreUpdate, restore_camera_transform)
+    .add_systems(PostUpdate, shake_camera.before(TransformSystems::Propagate));
 }
 
 /// Player movement speed factor.
@@ -174,6 +192,9 @@ struct CombatConfig {
     enemy_speed: f32,
     enemy_attack_distance: f32,
     teleport_cooldown: f32,
+    shockwave_radius: f32,
+    shockwave_animation_duration: f32,
+    stun_duration: f32,
 }
 
 impl Default for CombatConfig {
@@ -190,6 +211,9 @@ impl Default for CombatConfig {
             enemy_speed: 55.0,
             enemy_attack_distance: 64.0,
             teleport_cooldown: 5.0,
+            shockwave_radius: 120.0,
+            shockwave_animation_duration: 0.4,
+            stun_duration: 2.0,
         }
     }
 }
@@ -286,6 +310,42 @@ struct LightningVisual {
     end: Vec2,
     remaining: f32,
 }
+
+#[derive(Component, Clone, Copy, Debug)]
+struct ShockwaveVisual {
+    origin: Vec2,
+    elapsed: f32,
+    duration: f32,
+    radius: f32,
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+struct CameraShakeConfig {
+    trauma: f32,
+    trauma_per_stun: f32,
+    trauma_decay_per_second: f32,
+    exponent: f32,
+    max_rotation: f32,
+    max_translation: f32,
+    noise_speed: f32,
+}
+
+impl Default for CameraShakeConfig {
+    fn default() -> Self {
+        Self {
+            trauma: 0.0,
+            trauma_per_stun: 0.45,
+            trauma_decay_per_second: 1.2,
+            exponent: 2.0,
+            max_rotation: 0.08,
+            max_translation: 12.0,
+            noise_speed: 20.0,
+        }
+    }
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+struct UnshakenCameraTransform(Transform);
 
 #[derive(Component, Clone, Copy, Debug)]
 struct Projectile {
@@ -564,6 +624,47 @@ fn refreshed_stun(duration: f32) -> Stunned {
     Stunned {
         remaining: duration,
     }
+}
+
+fn stun_requested(keyboard: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+    keyboard.just_pressed(KeyCode::ShiftLeft)
+        || keyboard.just_pressed(KeyCode::ShiftRight)
+        || mouse.just_pressed(MouseButton::Middle)
+}
+
+/// Shift or middle click casts one shockwave even if several bindings arrive together.
+fn cast_stun(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut commands: Commands,
+    combat_config: Res<CombatConfig>,
+    mut shake: ResMut<CameraShakeConfig>,
+    player: Single<&Transform, With<Player>>,
+    enemies: Query<(Entity, &Transform, &Hitbox), (With<Enemy>, With<Health>, Without<Dying>)>,
+) {
+    if !stun_requested(&keyboard, &mouse) {
+        return;
+    }
+
+    let origin = player.translation.xy();
+    for (enemy, transform, hitbox) in &enemies {
+        if collision::circle_intersects_aabb(
+            origin,
+            combat_config.shockwave_radius,
+            hitbox.0.aabb_at(transform.translation.xy()),
+        ) {
+            commands
+                .entity(enemy)
+                .insert(refreshed_stun(combat_config.stun_duration));
+        }
+    }
+    commands.spawn(ShockwaveVisual {
+        origin,
+        elapsed: 0.0,
+        duration: combat_config.shockwave_animation_duration,
+        radius: combat_config.shockwave_radius,
+    });
+    shake.trauma = (shake.trauma + shake.trauma_per_stun).clamp(0.0, 1.0);
 }
 
 fn tick_stunned_enemies(
@@ -897,6 +998,52 @@ fn pause_menu_action(
     }
 }
 
+fn setup_camera_shake(
+    mut commands: Commands,
+    cameras: Query<(Entity, &Transform), (With<Camera2d>, Without<UnshakenCameraTransform>)>,
+) {
+    for (camera, transform) in &cameras {
+        commands
+            .entity(camera)
+            .insert(UnshakenCameraTransform(*transform));
+    }
+}
+
+/// Restore the pre-shake camera transform even while gameplay is paused.
+fn restore_camera_transform(
+    mut cameras: Query<(&UnshakenCameraTransform, &mut Transform), With<Camera2d>>,
+) {
+    for (unshaken, mut transform) in &mut cameras {
+        *transform = unshaken.0;
+    }
+}
+
+fn shake_noise(value: f32) -> f32 {
+    // Smooth deterministic noise is enough for a short, readable impact shake.
+    (value.sin() + (value * 0.73 + 1.7).sin() * 0.5) / 1.5
+}
+
+fn shake_camera(
+    time: Res<Time>,
+    mut shake: ResMut<CameraShakeConfig>,
+    mut cameras: Query<(&mut Transform, &mut UnshakenCameraTransform), With<Camera2d>>,
+) {
+    shake.trauma = shake.trauma.clamp(0.0, 1.0);
+    let amount = shake.trauma.powf(shake.exponent);
+    let t = time.elapsed_secs() * shake.noise_speed;
+    for (mut transform, mut unshaken) in &mut cameras {
+        // Update the stored normal transform after the tracking system has run.
+        unshaken.0 = *transform;
+        transform.translation += Vec3::new(
+            shake_noise(t + 100.0) * amount * shake.max_translation,
+            shake_noise(t + 200.0) * amount * shake.max_translation,
+            0.0,
+        );
+        transform.rotate_z(shake_noise(t) * amount * shake.max_rotation);
+    }
+    shake.trauma = (shake.trauma - shake.trauma_decay_per_second * time.delta_secs()).max(0.0);
+}
+
 /// Update the camera position by tracking the player.
 fn update_camera(
     mut camera: Single<&mut Transform, (With<Camera2d>, Without<Player>)>,
@@ -1036,7 +1183,7 @@ fn format_attack_hud(
         None if teleport.ready() => "Teleport: ready",
         None => {
             return format!(
-                "Move: WASD/arrows | Fire: left click | Right click: teleport ({:.1}s) | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
+                "Move: WASD/arrows | Fire: left click | Stun: Shift/middle click | Right click: teleport ({:.1}s) | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
                 teleport.remaining,
                 mode.label(),
                 attack_status
@@ -1044,7 +1191,7 @@ fn format_attack_hud(
         }
     };
     format!(
-        "Move: WASD/arrows | Fire: left click | Right click: {} | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
+        "Move: WASD/arrows | Fire: left click | Stun: Shift/middle click | Right click: {} | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
         teleport_status,
         mode.label(),
         attack_status
@@ -1538,6 +1685,19 @@ fn tick_lightning_visuals(
     }
 }
 
+fn tick_shockwaves(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut shockwaves: Query<(Entity, &mut ShockwaveVisual)>,
+) {
+    for (entity, mut shockwave) in &mut shockwaves {
+        shockwave.elapsed += time.delta_secs();
+        if shockwave.elapsed >= shockwave.duration {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 fn tick_attack_feedback(time: Res<Time>, mut feedback: ResMut<AttackFeedback>) {
     if let Some(mut rejection) = feedback.rejection {
         rejection.remaining -= time.delta_secs();
@@ -1562,6 +1722,22 @@ fn draw_lightning_range_feedback(
 
     if let Some(rejection) = feedback.rejection {
         gizmos.circle_2d(rejection.target, 14.0, Color::srgba(1.0, 0.0, 0.0, 0.9));
+    }
+}
+
+fn draw_shockwaves(mut gizmos: Gizmos, shockwaves: Query<&ShockwaveVisual>) {
+    for shockwave in &shockwaves {
+        let progress = (shockwave.elapsed / shockwave.duration).clamp(0.0, 1.0);
+        let alpha = 1.0 - progress;
+        for ring in 0..4 {
+            let offset = ring as f32 / 4.0;
+            let radius = (progress + offset * 0.22).min(1.0) * shockwave.radius;
+            gizmos.circle_2d(
+                shockwave.origin,
+                radius,
+                Color::srgba(0.65, 0.35, 1.0, alpha * (1.0 - offset * 0.5)),
+            );
+        }
     }
 }
 
@@ -2471,6 +2647,129 @@ mod tests {
                 .translation
                 .xy(),
             Vec2::ZERO
+        );
+    }
+
+    #[test]
+    fn each_stun_binding_is_recognized() {
+        for key in [KeyCode::ShiftLeft, KeyCode::ShiftRight] {
+            let mut keyboard = ButtonInput::default();
+            keyboard.press(key);
+            assert!(stun_requested(&keyboard, &ButtonInput::default()));
+        }
+        let mut mouse = ButtonInput::default();
+        mouse.press(MouseButton::Middle);
+        assert!(stun_requested(&ButtonInput::default(), &mouse));
+    }
+
+    #[test]
+    fn stun_bindings_coalesce_apply_once_and_shockwave_expires() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(CombatConfig {
+                shockwave_radius: 20.0,
+                shockwave_animation_duration: 0.1,
+                stun_duration: 2.0,
+                ..default()
+            })
+            .init_resource::<CameraShakeConfig>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.2),
+            ))
+            .add_systems(Update, (cast_stun, tick_shockwaves).chain());
+        app.world_mut().spawn((Player, Transform::default()));
+        let in_range = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(10.0), Vec2::ZERO)),
+                Transform::from_xyz(25.0, 0.0, 0.0),
+            ))
+            .id();
+        let out_of_range = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(10.0), Vec2::ZERO)),
+                Transform::from_xyz(25.1, 0.0, 0.0),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Middle);
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(in_range)
+                .get::<Stunned>()
+                .unwrap()
+                .remaining,
+            2.0
+        );
+        assert!(app.world().entity(out_of_range).get::<Stunned>().is_none());
+        assert_eq!(
+            app.world_mut()
+                .query::<&ShockwaveVisual>()
+                .iter(app.world())
+                .count(),
+            1,
+            "simultaneous bindings still spawn only one effect"
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear_just_pressed(KeyCode::ShiftLeft);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear_just_pressed(MouseButton::Middle);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query::<&ShockwaveVisual>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert!(app.world().resource::<CameraShakeConfig>().trauma > 0.0);
+    }
+
+    #[test]
+    fn camera_shake_clamps_decays_and_restores_transform() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(CameraShakeConfig {
+                trauma: 2.0,
+                trauma_decay_per_second: 1.0,
+                ..default()
+            })
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.25),
+            ))
+            .add_systems(Update, (restore_camera_transform, shake_camera).chain());
+        let normal = Transform::from_xyz(10.0, 20.0, 3.0);
+        let camera = app
+            .world_mut()
+            .spawn((Camera2d, normal, UnshakenCameraTransform(normal)))
+            .id();
+        app.update();
+        assert!(app.world().resource::<CameraShakeConfig>().trauma <= 1.0);
+        app.world_mut().resource_mut::<CameraShakeConfig>().trauma = 0.0;
+        app.update();
+        assert_eq!(
+            *app.world().entity(camera).get::<Transform>().unwrap(),
+            normal
         );
     }
 
