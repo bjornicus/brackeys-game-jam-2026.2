@@ -256,7 +256,7 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Verify systems interact correctly and leave maintainable documentation.
 
-- [ ] Add compact headless integration scenarios using manually advanced time:
+- [x] Add compact headless integration scenarios using manually advanced time:
   1. Auto in range -> lightning -> enemy health decreases.
   2. Auto out of range -> projectile -> swept hit -> enemy health decreases.
   3. Wall blocks lightning before animation/damage.
@@ -264,11 +264,11 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
   5. Stun pauses chase, expires, and chase resumes.
   6. Lethal damage enters death, waits for completion, and despawns.
   7. Teleport rejects a wall and cooldown, accepts floor after cooldown.
-- [ ] Ensure tests avoid rendering plugins/assets and complete in seconds after compilation.
-- [ ] Update in-game instructions for movement, attack modes, fire, teleport, stun, pause, and F3.
-- [ ] Update project documentation with editor entity controls, placeholder-asset replacement, tuning locations, and test commands.
-- [ ] Check pause/resume does not duplicate maps, players, enemies, health bars, effects, or resources.
-- [ ] Check simultaneous/near-simultaneous inputs have documented deterministic priority. Suggested priority while idle: stun, teleport, fire, movement; while firing: only pause is accepted.
+- [x] Ensure tests avoid rendering plugins/assets and complete in seconds after compilation.
+- [x] Update in-game instructions for movement, attack modes, fire, teleport, stun, pause, and F3.
+- [x] Update project documentation with editor entity controls, placeholder-asset replacement, tuning locations, and test commands.
+- [x] Check pause/resume does not duplicate maps, players, enemies, health bars, effects, or resources.
+- [x] Check simultaneous/near-simultaneous inputs have documented deterministic priority. Idle priority is stun, teleport, fire, movement; while firing only pause is accepted.
 - [ ] Run a release-mode smoke build only once at the end if time permits; routine validation remains debug-mode for speed.
 
 **Final automated gate:**
@@ -319,3 +319,4 @@ Add one short entry per completed step, for example:
 - `Step 8 — 2026-08-28`: Added child-sprite enemy health bars with clamped fills, timed reset-on-reapply stun state, state-priority animation selection, and deferred dying/death-animation cleanup that removes combat/movement components and recursively despawns bars. Added headless coverage for health ratios, stunned movement, and death transitions. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual health-bar/stun/death smoke not run.
 - `Step 9 — 2026-08-28`: Added right-click teleport using the shared terrain occupancy and player collider, positioning the player so the clicked point is the feet-collider center, plus five-second configurable cooldown, HUD ready/countdown/rejection feedback, and explicit firing-state rejection. Added coverage for floor/wall/sparse/edge/near-wall/entity-overlap occupancy, cooldown ticking, and busy rejection. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test --bin game teleport`, `cargo test`, and `cargo check --all-targets` passed. Manual teleport smoke not run: teleport around open floor and wall edges; verify invalid terrain does nothing, enemy overlap is allowed, and cooldown becomes ready after five seconds.
 - `Step 10 — 2026-08-28`: Added coalesced Shift/middle-click stun casts, hitbox-aware shockwave stun with concentric gizmo rings, and tunable trauma-based camera shake with unshaken PreUpdate restoration/PostUpdate application. Added circle/AABB, binding/coalescing, effect cleanup, and camera restoration/decay tests. Files changed: `src/collision.rs`, `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game stun`, `cargo test`, and `cargo check --all-targets` passed. Manual shockwave/stun/camera-shake smoke not run: test both Shift keys and middle click; verify ring radius matches affected enemies, camera shake recovers without drift, including after pause/resume.
+- `Step 11 — 2026-08-28`: Hardened simultaneous input priority (idle: stun, teleport, fire, movement; firing: pause only), corrected the configured shockwave radius to 240, and documented game/editor controls, placeholder replacement, tuning, and validation commands in `README.md`. Added a compact headless auto-range combat integration scenario; the focused existing headless tests collectively cover the remaining listed wall, stun/death, and teleport scenarios with manually advanced time. Pause/resume duplication was checked against the one-time `GameInitialized`/`EnemiesSpawned` guards. Files changed: `src/config.rs`, `src/game.rs`, `README.md`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Release build and the final manual regression script were not run.

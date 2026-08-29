@@ -492,5 +492,20 @@
             y: 2,
             kind: Enemy,
         ),
+        (
+            x: -5,
+            y: 3,
+            kind: Enemy,
+        ),
+        (
+            x: -4,
+            y: 7,
+            kind: Enemy,
+        ),
+        (
+            x: -3,
+            y: 5,
+            kind: Enemy,
+        ),
     ],
 )

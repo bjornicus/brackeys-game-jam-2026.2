@@ -578,14 +578,15 @@ fn cast_stun(
     mut commands: Commands,
     combat_config: Res<CombatConfig>,
     mut shake: ResMut<CameraShakeConfig>,
-    player: Single<&Transform, With<Player>>,
+    player: Single<(&Transform, Option<&PlayerAction>), With<Player>>,
     enemies: Query<(Entity, &Transform, &Hitbox), (With<Enemy>, With<Health>, Without<Dying>)>,
 ) {
-    if !stun_requested(&keyboard, &mouse) {
+    // Firing accepts no gameplay input other than pause (handled separately).
+    if !stun_requested(&keyboard, &mouse) || player.1.is_some() {
         return;
     }
 
-    let origin = player.translation.xy();
+    let origin = player.0.translation.xy();
     for (enemy, transform, hitbox) in &enemies {
         if collision::circle_intersects_aabb(
             origin,
@@ -1356,6 +1357,12 @@ fn control_character(
         return;
     }
 
+    // `cast_stun` runs before this system. Stun wins simultaneous idle input,
+    // so a Shift/middle-click cannot also teleport, fire, or move this frame.
+    if stun_requested(&keyboard, &mouse) {
+        return;
+    }
+
     if mouse.just_pressed(MouseButton::Right) {
         if !teleport.ready() {
             reject_teleport(&mut teleport, TeleportRejection::Cooldown);
@@ -2068,6 +2075,98 @@ mod tests {
             query.iter(app.world()).count()
         };
         assert_eq!(visual_count, 0);
+    }
+
+    #[test]
+    fn integration_auto_attacks_damage_an_enemy_by_range() {
+        let target = Vec2::new(120.0, 0.0);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<AttackFired>()
+            .add_message::<Damage>()
+            .insert_resource(CombatConfig::default())
+            .insert_resource(GameMap(floor_rect(-1..=5, -1..=1)))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.5),
+            ))
+            .add_systems(
+                Update,
+                (
+                    handle_lightning_attacks,
+                    spawn_projectiles,
+                    move_projectiles,
+                    apply_damage,
+                )
+                    .chain(),
+            );
+        let player = app.world_mut().spawn((Faction::Player,)).id();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Faction::Enemy,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Transform::from_translation(target.extend(0.0)),
+            ))
+            .id();
+
+        let lightning_target = Vec2::new(180.0, 0.0);
+        let lightning_kind = resolve_attack_kind(
+            AttackMode::Auto,
+            Vec2::ZERO,
+            lightning_target,
+            CombatConfig::default().lightning_range,
+        );
+        assert_eq!(lightning_kind, AttackKind::Lightning);
+        app.world_mut()
+            .resource_mut::<Messages<AttackFired>>()
+            .write(AttackFired {
+                entity: player,
+                request: AttackRequest {
+                    kind: lightning_kind,
+                    origin: Vec2::ZERO,
+                    target: lightning_target,
+                    direction: Vec2::X,
+                },
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(enemy).get::<Health>().unwrap().current,
+            60.0
+        );
+
+        app.world_mut()
+            .entity_mut(enemy)
+            .get_mut::<Health>()
+            .unwrap()
+            .current = 100.0;
+        let projectile_target = Vec2::new(300.0, 0.0);
+        let projectile_kind = resolve_attack_kind(
+            AttackMode::Auto,
+            Vec2::ZERO,
+            projectile_target,
+            CombatConfig::default().lightning_range,
+        );
+        assert_eq!(projectile_kind, AttackKind::Projectile);
+        app.world_mut()
+            .resource_mut::<Messages<AttackFired>>()
+            .write(AttackFired {
+                entity: player,
+                request: AttackRequest {
+                    kind: projectile_kind,
+                    origin: Vec2::ZERO,
+                    target: projectile_target,
+                    direction: Vec2::X,
+                },
+            });
+        app.update();
+        assert_eq!(
+            app.world().entity(enemy).get::<Health>().unwrap().current,
+            70.0
+        );
     }
 
     #[test]
@@ -2841,6 +2940,53 @@ mod tests {
 
         reject_teleport(&mut cooldown, TeleportRejection::Busy);
         assert_eq!(cooldown.rejection, Some(TeleportRejection::Busy));
+    }
+
+    #[test]
+    fn simultaneous_stun_input_has_priority_over_fire_teleport_and_movement() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(GameMap(flat_test_map()))
+            .insert_resource(test_player_animations())
+            .insert_resource(SelectedAttackMode(AttackMode::Auto))
+            .insert_resource(CombatConfig::default())
+            .insert_resource(CursorWorld(Some(Vec2::new(10.0, 0.0))))
+            .init_resource::<AttackFeedback>()
+            .init_resource::<TeleportCooldown>()
+            .add_systems(Update, control_character);
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
+                Facing::Right,
+                SpritesheetAnimation::new(Handle::default()),
+                Transform::from_xyz(0.0, 0.0, 2.0),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
+
+        assert!(!app.world().entity(player).contains::<PlayerAction>());
+        assert_eq!(
+            app.world()
+                .entity(player)
+                .get::<Transform>()
+                .unwrap()
+                .translation
+                .xy(),
+            Vec2::ZERO
+        );
     }
 
     #[test]
