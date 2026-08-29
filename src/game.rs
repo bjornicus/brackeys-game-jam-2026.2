@@ -102,7 +102,14 @@ pub fn game_plugin(app: &mut App) {
         Update,
         (tick_player_invulnerability, update_player_health_hud)
             .chain()
+            .after(apply_damage)
             .run_if(in_state(GameState::Game)),
+    )
+    // The dialogue overlay pauses gameplay but may obscure a HUD change queued in the
+    // preceding frame, so keep this purely-presentational refresh safe in Dialogue.
+    .add_systems(
+        Update,
+        update_player_health_hud.run_if(in_state(GameState::Dialogue)),
     )
     .add_systems(
         Update,
@@ -404,8 +411,15 @@ impl TeleportCooldown {
 #[derive(Component)]
 struct AttackHud;
 
+/// Root of the fixed-screen player-health HUD for the current run.
 #[derive(Component)]
 struct PlayerHealthHud;
+
+#[derive(Component)]
+struct PlayerHealthBarFill;
+
+#[derive(Component)]
+struct PlayerHealthText;
 
 #[derive(Component, Clone, Copy, Debug)]
 struct Invulnerable {
@@ -1576,18 +1590,46 @@ fn setup_player_health_hud(mut commands: Commands, needs_spawn: Res<RunNeedsSpaw
     commands.spawn((
         RunScoped,
         PlayerHealthHud,
-        Text::new("Health: 100 / 100  [██████████]"),
-        TextFont {
-            font_size: FontSize::Px(20.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.9, 0.25, 0.25)),
         Node {
             position_type: PositionType::Absolute,
             top: px(12),
             left: px(12),
+            width: px(250),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(5),
             ..default()
         },
+        children![
+            (
+                Text::new("Health: 100 / 100"),
+                PlayerHealthText,
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.9, 0.9)),
+            ),
+            (
+                Node {
+                    width: percent(100),
+                    height: px(18),
+                    padding: UiRect::all(px(2)),
+                    border: UiRect::all(px(1)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.12, 0.04, 0.04)),
+                BorderColor::all(Color::srgb(0.9, 0.32, 0.32)),
+                children![(
+                    PlayerHealthBarFill,
+                    Node {
+                        width: percent(100),
+                        height: percent(100),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.2, 0.85, 0.3)),
+                )],
+            ),
+        ],
     ));
 }
 
@@ -2702,26 +2744,39 @@ fn game_over_action(
 }
 
 fn player_health_ratio(health: Health) -> f32 {
-    if health.max <= 0.0 {
-        0.0
-    } else {
-        (health.current / health.max).clamp(0.0, 1.0)
+    if !health.current.is_finite()
+        || !health.max.is_finite()
+        || health.current < 0.0
+        || health.max <= 0.0
+    {
+        return 0.0;
     }
+    (health.current / health.max).clamp(0.0, 1.0)
+}
+
+fn player_health_text(health: Health) -> String {
+    if !health.current.is_finite() || !health.max.is_finite() || health.max <= 0.0 {
+        return "Health: 0 / 0".to_owned();
+    }
+    format!(
+        "Health: {:.0} / {:.0}",
+        health.current.clamp(0.0, health.max),
+        health.max
+    )
+}
+
+fn player_health_fill_width(health: Health) -> Val {
+    Val::Percent(player_health_ratio(health) * 100.0)
 }
 
 fn update_player_health_hud(
     player: Single<&Health, With<Player>>,
-    mut hud: Single<&mut Text, With<PlayerHealthHud>>,
+    mut text: Single<&mut Text, With<PlayerHealthText>>,
+    mut fill: Single<&mut Node, With<PlayerHealthBarFill>>,
 ) {
-    let health = *player;
-    let filled = (player_health_ratio(*health) * 10.0).round() as usize;
-    hud.0 = format!(
-        "Health: {:.0} / {:.0}  [{}{}]",
-        health.current,
-        health.max,
-        "█".repeat(filled),
-        "·".repeat(10 - filled)
-    );
+    let health = **player;
+    text.0 = player_health_text(health);
+    fill.width = player_health_fill_width(health);
 }
 
 fn tick_lightning_visuals(
@@ -4655,6 +4710,171 @@ mod tests {
             }),
             0.0
         );
+    }
+
+    #[test]
+    fn player_health_bar_ratio_and_fill_width_are_safe() {
+        let cases = [
+            (
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                1.0,
+            ),
+            (
+                Health {
+                    current: 25.0,
+                    max: 100.0,
+                },
+                0.25,
+            ),
+            (
+                Health {
+                    current: 0.0,
+                    max: 100.0,
+                },
+                0.0,
+            ),
+            (
+                Health {
+                    current: 150.0,
+                    max: 100.0,
+                },
+                1.0,
+            ),
+            (
+                Health {
+                    current: 10.0,
+                    max: 0.0,
+                },
+                0.0,
+            ),
+            (
+                Health {
+                    current: -1.0,
+                    max: 100.0,
+                },
+                0.0,
+            ),
+            (
+                Health {
+                    current: f32::NAN,
+                    max: 100.0,
+                },
+                0.0,
+            ),
+            (
+                Health {
+                    current: f32::INFINITY,
+                    max: 100.0,
+                },
+                0.0,
+            ),
+            (
+                Health {
+                    current: 25.0,
+                    max: f32::INFINITY,
+                },
+                0.0,
+            ),
+            (
+                Health {
+                    current: 25.0,
+                    max: f32::NEG_INFINITY,
+                },
+                0.0,
+            ),
+        ];
+        for (health, expected_ratio) in cases {
+            assert_eq!(player_health_ratio(health), expected_ratio);
+            assert_eq!(
+                player_health_fill_width(health),
+                Val::Percent(expected_ratio * 100.0)
+            );
+        }
+        assert_eq!(
+            player_health_text(Health {
+                current: f32::NAN,
+                max: 100.0,
+            }),
+            "Health: 0 / 0"
+        );
+        assert_eq!(
+            player_health_text(Health {
+                current: 25.0,
+                max: f32::INFINITY,
+            }),
+            "Health: 0 / 0"
+        );
+        assert_eq!(
+            player_health_text(Health {
+                current: -10.0,
+                max: 100.0,
+            }),
+            "Health: 0 / 100"
+        );
+    }
+
+    #[test]
+    fn player_health_bar_refreshes_text_and_fill_in_dialogue() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .add_systems(
+                Update,
+                update_player_health_hud.run_if(in_state(GameState::Dialogue)),
+            );
+        app.world_mut().spawn((
+            Player,
+            Health {
+                current: 35.0,
+                max: 150.0,
+            },
+        ));
+        let text = app
+            .world_mut()
+            .spawn((PlayerHealthText, Text::new("stale")))
+            .id();
+        let fill = app
+            .world_mut()
+            .spawn((
+                PlayerHealthBarFill,
+                Node {
+                    width: percent(100),
+                    ..default()
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<NextState<GameState>>()
+            .set(GameState::Dialogue);
+        app.update();
+
+        assert_eq!(
+            app.world().entity(text).get::<Text>().unwrap().0,
+            "Health: 35 / 150"
+        );
+        assert_eq!(
+            app.world().entity(fill).get::<Node>().unwrap().width,
+            Val::Percent(35.0 / 150.0 * 100.0)
+        );
+    }
+
+    #[test]
+    fn player_health_hud_spawns_once_and_is_run_scoped() {
+        let mut app = App::new();
+        app.init_resource::<RunNeedsSpawn>()
+            .add_systems(Update, setup_player_health_hud);
+        app.update();
+        app.world_mut().resource_mut::<RunNeedsSpawn>().0 = false;
+        app.update();
+
+        let world = app.world_mut();
+        assert_eq!(world.query::<&PlayerHealthHud>().iter(world).count(), 1);
+        assert_eq!(world.query::<&RunScoped>().iter(world).count(), 1);
+        assert_eq!(world.query::<&PlayerHealthBarFill>().iter(world).count(), 1);
+        assert_eq!(world.query::<&PlayerHealthText>().iter(world).count(), 1);
     }
 
     #[test]
