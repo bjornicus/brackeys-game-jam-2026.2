@@ -36,6 +36,8 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<EnemiesSpawned>()
         .init_resource::<TerminalsSpawned>()
         .init_resource::<PickupsSpawned>()
+        .init_resource::<HealthDropSeed>()
+        .init_resource::<HealthDropSeedSequence>()
         .insert_resource(StoryDialogueCatalog::load())
         .init_resource::<RestartRequest>()
         .init_resource::<RunProgress>()
@@ -252,6 +254,43 @@ struct TerminalsSpawned(bool);
 
 #[derive(Resource, Default)]
 struct PickupsSpawned(bool);
+
+/// Per-run seed for deterministic health-drop eligibility. Checkpoint continuation preserves it.
+#[derive(Resource, Clone, Copy, Debug, Eq, PartialEq)]
+struct HealthDropSeed(u64);
+
+impl Default for HealthDropSeed {
+    fn default() -> Self {
+        Self(0x7f4a_7c15_9e37_79b9)
+    }
+}
+
+/// App-lifetime sequence that supplies a distinct deterministic seed to each new run.
+/// It intentionally outlives Main Menu transitions; only the active `HealthDropSeed` is run state.
+#[derive(Resource, Clone, Copy, Debug, Eq, PartialEq)]
+struct HealthDropSeedSequence(u64);
+
+impl Default for HealthDropSeedSequence {
+    fn default() -> Self {
+        Self(0xd1b5_4a32_d192_ed03)
+    }
+}
+
+impl HealthDropSeedSequence {
+    fn next_run_seed(&mut self) -> HealthDropSeed {
+        self.0 = next_health_drop_seed(self.0);
+        HealthDropSeed(self.0)
+    }
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+struct HealthDrop {
+    source: PlacementId,
+}
+
+/// Reserved for Step 2 collection logic.
+#[derive(Component)]
+struct HealthDropTrigger;
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 enum PickupKind {
@@ -599,8 +638,12 @@ fn restart_run(
     mut feedback: ResMut<AttackFeedback>,
     mut collision_debug: ResMut<CollisionDebug>,
     mut shake: ResMut<CameraShakeConfig>,
-    mut enemies_spawned: ResMut<EnemiesSpawned>,
-    mut terminals_spawned: ResMut<TerminalsSpawned>,
+    mut spawn_lifecycle: ParamSet<(
+        ResMut<EnemiesSpawned>,
+        ResMut<TerminalsSpawned>,
+        ResMut<HealthDropSeed>,
+        ResMut<HealthDropSeedSequence>,
+    )>,
     mut player_spawn: ResMut<PlayerSpawn>,
     mut needs_spawn: ResMut<RunNeedsSpawn>,
     mut cameras: Query<(&UnshakenCameraTransform, &mut Transform), With<Camera2d>>,
@@ -617,13 +660,14 @@ fn restart_run(
     *feedback = AttackFeedback::default();
     *collision_debug = CollisionDebug::default();
     shake.trauma = 0.0;
-    enemies_spawned.0 = false;
-    terminals_spawned.0 = false;
+    spawn_lifecycle.p0().0 = false;
+    spawn_lifecycle.p1().0 = false;
     commands.insert_resource(PickupsSpawned::default());
     needs_spawn.0 = true;
 
     match intent.0 {
         RestartIntent::NewGame => {
+            *spawn_lifecycle.p2() = spawn_lifecycle.p3().next_run_seed();
             *progress = RunProgress::default();
             *checkpoint = CheckpointSnapshot::default();
             *player_spawn = PlayerSpawn::default();
@@ -638,6 +682,8 @@ fn restart_run(
             next_state.set(GameState::Game);
         }
         RestartIntent::MainMenu => {
+            // The active seed is discarded; the app-lifetime sequence remains for the next run.
+            *spawn_lifecycle.p2() = HealthDropSeed::default();
             *progress = RunProgress::default();
             *checkpoint = CheckpointSnapshot::default();
             *player_spawn = PlayerSpawn::default();
@@ -1533,19 +1579,78 @@ fn health_bar_ratio(health: Health) -> f32 {
     }
 }
 
+/// A small stable mixer avoids a runtime RNG dependency while giving each placed enemy a
+/// repeatable per-run roll. The output is uniform enough for the configured gameplay chance.
+fn health_drop_roll(seed: u64, placement: PlacementId, chance: f32) -> bool {
+    let chance = chance.clamp(0.0, 1.0);
+    if chance == 0.0 {
+        return false;
+    }
+    if chance == 1.0 {
+        return true;
+    }
+    let mut value = seed
+        ^ (placement.x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (placement.y as i64 as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    (value as f64 / u64::MAX as f64) < chance as f64
+}
+
+fn next_health_drop_seed(seed: u64) -> u64 {
+    let mut next = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    next ^= next >> 30;
+    next = next.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    next ^ (next >> 27)
+}
+
+fn spawn_health_drop(commands: &mut Commands, source: PlacementId, position: Vec3) {
+    commands.spawn((
+        RunScoped,
+        HealthDrop { source },
+        HealthDropTrigger,
+        Sprite {
+            color: Color::srgb(0.2, 0.95, 0.35),
+            custom_size: Some(Vec2::splat(28.0)),
+            ..default()
+        },
+        Transform::from_translation(position.with_z(3.0)),
+    ));
+}
+
 fn begin_enemy_deaths(
     mut commands: Commands,
     animations: Res<EnemyAnimations>,
+    health_drop_seed: Res<HealthDropSeed>,
+    combat_config: Res<CombatConfig>,
     mut progress: Option<ResMut<RunProgress>>,
     enemies: Query<
-        (Entity, &Health, Option<&Children>, Option<&Placement>),
+        (
+            Entity,
+            &Health,
+            &Transform,
+            Option<&Children>,
+            Option<&Placement>,
+        ),
         (With<Enemy>, Without<Dying>),
     >,
 ) {
-    for (enemy, health, children, placement) in &enemies {
+    for (enemy, health, transform, children, placement) in &enemies {
         if health.current <= 0.0 {
             if let (Some(progress), Some(placement)) = (&mut progress, placement) {
                 progress.defeated_enemies.insert(placement.0);
+            }
+            if let Some(placement) = placement
+                && health_drop_roll(
+                    health_drop_seed.0,
+                    placement.0,
+                    combat_config.enemy_health_drop_chance,
+                )
+            {
+                spawn_health_drop(&mut commands, placement.0, transform.translation);
             }
             if let Some(children) = children {
                 for child in children.iter() {
@@ -3916,6 +4021,8 @@ mod tests {
         death_app
             .add_plugins(MinimalPlugins)
             .insert_resource(RunProgress::default())
+            .insert_resource(HealthDropSeed::default())
+            .insert_resource(CombatConfig::default())
             .insert_resource(EnemyAnimations {
                 idle: Handle::default(),
                 movement: Handle::default(),
@@ -3932,6 +4039,7 @@ mod tests {
                     current: 0.0,
                     max: 100.0,
                 },
+                Transform::default(),
             ))
             .id();
         death_app.update();
@@ -4279,6 +4387,8 @@ mod tests {
                 stunned: Handle::default(),
                 death: Handle::default(),
             })
+            .insert_resource(HealthDropSeed::default())
+            .insert_resource(CombatConfig::default())
             .add_systems(
                 Update,
                 (apply_damage, begin_enemy_deaths, finish_enemy_deaths).chain(),
@@ -4296,6 +4406,7 @@ mod tests {
                     speed: 1.0,
                     attack_distance: 1.0,
                 },
+                Transform::default(),
             ))
             .id();
         app.world_mut()
@@ -5039,6 +5150,8 @@ mod tests {
             .init_resource::<EnemiesSpawned>()
             .init_resource::<TerminalsSpawned>()
             .init_resource::<PickupsSpawned>()
+            .init_resource::<HealthDropSeed>()
+            .init_resource::<HealthDropSeedSequence>()
             .init_resource::<PlayerSpawn>()
             .init_resource::<RunNeedsSpawn>()
             .add_systems(Update, restart_run);
@@ -5507,6 +5620,169 @@ mod tests {
                 current: 100.0,
                 max: 100.0,
             }
+        );
+    }
+
+    #[test]
+    fn health_drop_seed_sequence_refreshes_new_games_preserves_continue_and_cleans_drops() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .init_resource::<RestartRequest>()
+            .init_resource::<RunProgress>()
+            .init_resource::<CheckpointSnapshot>()
+            .init_resource::<SelectedAttackMode>()
+            .init_resource::<TeleportCooldown>()
+            .init_resource::<AttackFeedback>()
+            .init_resource::<CollisionDebug>()
+            .init_resource::<CameraShakeConfig>()
+            .init_resource::<EnemiesSpawned>()
+            .init_resource::<TerminalsSpawned>()
+            .init_resource::<PickupsSpawned>()
+            .init_resource::<HealthDropSeed>()
+            .init_resource::<HealthDropSeedSequence>()
+            .init_resource::<PlayerSpawn>()
+            .init_resource::<RunNeedsSpawn>()
+            .add_systems(Update, restart_run);
+
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::NewGame;
+        app.update();
+        let first_seed = *app.world().resource::<HealthDropSeed>();
+        let sequence_after_first = *app.world().resource::<HealthDropSeedSequence>();
+        let drop = app
+            .world_mut()
+            .spawn((
+                RunScoped,
+                HealthDrop {
+                    source: PlacementId { x: 1, y: 2 },
+                },
+                HealthDropTrigger,
+            ))
+            .id();
+
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::ContinueCheckpoint;
+        app.update();
+        assert_eq!(*app.world().resource::<HealthDropSeed>(), first_seed);
+        assert_eq!(
+            *app.world().resource::<HealthDropSeedSequence>(),
+            sequence_after_first
+        );
+        assert!(app.world().get_entity(drop).is_err());
+
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::MainMenu;
+        app.update();
+        assert_eq!(
+            *app.world().resource::<HealthDropSeedSequence>(),
+            sequence_after_first
+        );
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::NewGame;
+        app.update();
+        let second_seed = *app.world().resource::<HealthDropSeed>();
+        assert_ne!(first_seed, second_seed);
+        assert_ne!(
+            *app.world().resource::<HealthDropSeedSequence>(),
+            sequence_after_first
+        );
+    }
+
+    #[test]
+    fn health_drop_roll_is_seeded_and_clamps_chance() {
+        let placement = PlacementId { x: -3, y: 7 };
+        assert!(!health_drop_roll(1, placement, 0.0));
+        assert!(health_drop_roll(1, placement, 1.0));
+        assert!(!health_drop_roll(1, placement, -5.0));
+        assert!(health_drop_roll(1, placement, 5.0));
+        assert_eq!(
+            health_drop_roll(0x42, placement, 0.25),
+            health_drop_roll(0x42, placement, 0.25)
+        );
+        assert_ne!(next_health_drop_seed(0x42), 0x42);
+        let differs_for_some_placement = (-32..=32).any(|x| {
+            (-32..=32).any(|y| {
+                let placement = PlacementId { x, y };
+                health_drop_roll(0x42, placement, 0.25)
+                    != health_drop_roll(next_health_drop_seed(0x42), placement, 0.25)
+            })
+        });
+        assert!(differs_for_some_placement);
+    }
+
+    #[test]
+    fn placed_enemy_death_spawns_one_run_scoped_health_drop_at_death_position() {
+        let placement = PlacementId { x: 2, y: -4 };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
+            })
+            .insert_resource(HealthDropSeed(7))
+            .insert_resource(CombatConfig {
+                enemy_health_drop_chance: 1.0,
+                ..default()
+            })
+            .insert_resource(RunProgress::default())
+            .add_systems(Update, begin_enemy_deaths);
+        let position = Vec3::new(31.0, -17.0, 2.0);
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Placement(placement),
+                Health {
+                    current: 0.0,
+                    max: 100.0,
+                },
+                Transform::from_translation(position),
+            ))
+            .id();
+
+        app.update();
+        app.update();
+        assert!(app.world().entity(enemy).contains::<Dying>());
+        let world = app.world_mut();
+        let drops: Vec<_> = world
+            .query::<(&HealthDrop, &Transform, &RunScoped)>()
+            .iter(world)
+            .collect();
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].0.source, placement);
+        assert_eq!(drops[0].1.translation, position.with_z(3.0));
+    }
+
+    #[test]
+    fn unplaced_enemy_death_never_spawns_health_drop() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
+            })
+            .insert_resource(HealthDropSeed::default())
+            .insert_resource(CombatConfig {
+                enemy_health_drop_chance: 1.0,
+                ..default()
+            })
+            .add_systems(Update, begin_enemy_deaths);
+        app.world_mut().spawn((
+            Enemy,
+            Health {
+                current: 0.0,
+                max: 100.0,
+            },
+            Transform::default(),
+        ));
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<HealthDrop>>()
+                .iter(app.world())
+                .count(),
+            0
         );
     }
 

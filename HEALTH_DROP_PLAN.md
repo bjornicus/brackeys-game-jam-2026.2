@@ -62,14 +62,14 @@ This plan is divided into three sequential implementation steps. A forked implem
 
 **Goal:** Create at most one deterministic, run-scoped health item when an eligible enemy dies.
 
-- [ ] Add `enemy_health_drop_chance = 0.25` and `health_drop_healing = 25.0` to `CombatConfig`.
-- [ ] Add a per-run drop seed resource/state. Continue preserves it; New Game refreshes it; Main Menu discards it before the next run.
-- [ ] Add a pure deterministic drop-roll helper using run seed plus enemy `PlacementId`, with chance clamped to `0..=1`.
-- [ ] Add a `HealthDrop` runtime component tied to the source enemy placement and a distinct procedural green visual/trigger at the death position.
-- [ ] Integrate drop creation exactly once when a placed enemy first enters `Dying`; dying/stunned/despawn completion must not duplicate it.
-- [ ] Mark every drop `RunScoped`; restart cleanup removes outstanding drops.
-- [ ] Ensure enemies filtered as defeated by checkpoint progress do not independently create drops during rebuild.
-- [ ] Add headless tests for 0%/100% chance, stable same-seed outcomes, seed variation, placed-vs-unplaced enemies, one drop per death, death-position placement, and run cleanup/no duplicate drops.
+- [x] Add `enemy_health_drop_chance = 0.25` and `health_drop_healing = 25.0` to `CombatConfig`.
+- [x] Add a per-run drop seed resource/state. Continue preserves it; New Game refreshes it; Main Menu discards it before the next run.
+- [x] Add a pure deterministic drop-roll helper using run seed plus enemy `PlacementId`, with chance clamped to `0..=1`.
+- [x] Add a `HealthDrop` runtime component tied to the source enemy placement and a distinct procedural green visual/trigger at the death position.
+- [x] Integrate drop creation exactly once when a placed enemy first enters `Dying`; dying/stunned/despawn completion must not duplicate it.
+- [x] Mark every drop `RunScoped`; restart cleanup removes outstanding drops.
+- [x] Ensure enemies filtered as defeated by checkpoint progress do not independently create drops during rebuild.
+- [x] Add headless tests for 0%/100% chance, stable same-seed outcomes, seed variation, placed-vs-unplaced enemies, one drop per death, death-position placement, and run cleanup/no duplicate drops.
 
 **Manual acceptance:** Defeat several enemies and verify only some create one clearly visible green health item at the death location. If not run, record it.
 
@@ -103,3 +103,4 @@ Append one entry per completed step:
 
 - `Step N — YYYY-MM-DD`: summary; files changed; commands/results; manual checks; known follow-up.
 - `Step 0 — 2026-08-29`: Replaced the text-only health indicator with a run-scoped fixed UI root containing a labelled `current / maximum` text, bordered background, and green proportional fill. The fill is driven by a clamped finite-only ratio helper and is also refreshed while dialogue is active; invalid health displays safely as `0 / 0`. Added headless ratio/fill (including negative, NaN, and infinity), dialogue refresh, and one-HUD run-ownership tests. Files changed: `src/game.rs`, `HEALTH_DROP_PLAN.md`. Baseline and final `cargo fmt --check`, `cargo test` (87 tests), and `cargo check --all-targets` passed; targeted `cargo test player_health_bar` passed. Manual game/armor HUD smoke check not run. Follow-up: enemy health drops are Step 1.
+- `Step 1 — 2026-08-29`: Added centralized 25% health-drop and 25-health tuning, deterministic per-run seed/placement rolls, green run-scoped health-drop visuals/triggers, and first-death-only spawning at map-enemy death positions. Continue preserves the seed; New Game advances it; Main Menu resets it. Added pure roll, seed-lifecycle/variation, placed/unplaced/death-position/no-duplicate, and RunScoped-cleanup tests. Files changed: `src/config.rs`, `src/game.rs`, `HEALTH_DROP_PLAN.md`. Baseline/final `cargo fmt --check`, targeted `cargo test health_drop`, `cargo test` (91 tests), and `cargo check --all-targets` passed. Manual enemy-drop smoke check not run. Follow-up: Step 2 owns health-drop collection/healing.
