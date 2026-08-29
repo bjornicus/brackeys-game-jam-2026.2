@@ -26,6 +26,8 @@ pub struct RunProgress {
     pub defeated_enemies: std::collections::BTreeSet<PlacementId>,
     pub unlocked_skills: std::collections::BTreeSet<Skill>,
     pub armor_collected: u32,
+    /// Maximum health earned through Reinforced Armor, restored at checkpoints.
+    pub maximum_health_bonus: u32,
 }
 
 /// The latest checkpoint's permanent progress and respawn tile.

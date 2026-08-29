@@ -7,7 +7,7 @@ use map_support::{
     collision::{self, Collider},
     dialogue::{DialogueCatalog, DialogueLine, Speaker, load_dialogue_catalog},
     map,
-    progression::{CheckpointSnapshot, PlacementId, RunProgress},
+    progression::{CheckpointSnapshot, PlacementId, RunProgress, Skill},
     tilemap::{self, TerrainAtlas, TerrainTilemapPlugin},
 };
 use std::collections::HashSet;
@@ -35,6 +35,7 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<CameraShakeConfig>()
         .init_resource::<EnemiesSpawned>()
         .init_resource::<TerminalsSpawned>()
+        .init_resource::<PickupsSpawned>()
         .insert_resource(StoryDialogueCatalog::load())
         .init_resource::<RestartRequest>()
         .init_resource::<RunProgress>()
@@ -86,6 +87,16 @@ pub fn game_plugin(app: &mut App) {
             .chain()
             .run_if(in_state(GameState::Game)),
     )
+    // World triggers are ordered so a terminal wins an overlap, then a pickup can refresh both
+    // HUDs before its dialogue transition freezes gameplay on the next frame.
+    .add_systems(
+        Update,
+        activate_touched_pickup
+            .after(activate_touched_terminal)
+            .before(update_attack_hud)
+            .before(update_player_health_hud)
+            .run_if(in_state(GameState::Game)),
+    )
     .add_systems(
         Update,
         (tick_player_invulnerability, update_player_health_hud)
@@ -106,6 +117,7 @@ pub fn game_plugin(app: &mut App) {
         (
             spawn_enemies_from_map,
             spawn_terminals_from_map,
+            spawn_pickups_from_map,
             attach_enemy_sprites,
             spawn_enemy_health_bars,
             tick_stunned_enemies,
@@ -197,6 +209,24 @@ struct EnemiesSpawned(bool);
 
 #[derive(Resource, Default)]
 struct TerminalsSpawned(bool);
+
+#[derive(Resource, Default)]
+struct PickupsSpawned(bool);
+
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+enum PickupKind {
+    Skill(Skill),
+    ReinforcedArmor,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+struct Pickup {
+    placement: PlacementId,
+    kind: PickupKind,
+}
+
+#[derive(Component)]
+struct PickupTrigger;
 
 #[derive(Component, Clone, Debug)]
 struct Terminal {
@@ -293,7 +323,7 @@ struct SelectedAttackMode(AttackMode);
 
 impl Default for SelectedAttackMode {
     fn default() -> Self {
-        Self(AttackMode::Auto)
+        Self(AttackMode::Lightning)
     }
 }
 
@@ -356,7 +386,7 @@ struct PlayerHitFlash;
 struct Hitbox(Collider);
 
 #[allow(dead_code)]
-#[derive(Component, Clone, Copy, Debug)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 struct Health {
     current: f32,
     max: f32,
@@ -542,6 +572,7 @@ fn restart_run(
     shake.trauma = 0.0;
     enemies_spawned.0 = false;
     terminals_spawned.0 = false;
+    commands.insert_resource(PickupsSpawned::default());
     needs_spawn.0 = true;
 
     match intent.0 {
@@ -577,6 +608,7 @@ fn spawn_character(
     spawn: Res<PlayerSpawn>,
     needs_spawn: Res<RunNeedsSpawn>,
     combat_config: Res<CombatConfig>,
+    progress: Res<RunProgress>,
 ) {
     if !needs_spawn.0 {
         return;
@@ -648,7 +680,7 @@ fn spawn_character(
             combat_config.player_combat_hitbox_size,
             Vec2::ZERO,
         )),
-        default_player_health(&combat_config),
+        restored_player_health(&combat_config, &progress),
         Facing::Right,
         sprite,
         SpritesheetAnimation::new(idle[Facing::Right.animation_index()].clone()),
@@ -816,6 +848,166 @@ fn activate_touched_terminal(
     );
 }
 
+fn pickup_kind_from_map(kind: &map::MapEntityKind) -> Option<PickupKind> {
+    match kind {
+        map::MapEntityKind::SkillPickup { skill } => Some(PickupKind::Skill(*skill)),
+        map::MapEntityKind::ReinforcedArmorPickup => Some(PickupKind::ReinforcedArmor),
+        _ => None,
+    }
+}
+
+fn spawn_pickups_from_map(
+    mut commands: Commands,
+    game_map: Option<Res<GameMap>>,
+    progress: Res<RunProgress>,
+    mut spawned: ResMut<PickupsSpawned>,
+) {
+    if spawned.0 {
+        return;
+    }
+    let Some(game_map) = game_map else {
+        return;
+    };
+    let mut placements: Vec<_> = game_map
+        .0
+        .entities
+        .iter()
+        .filter_map(|placement| pickup_kind_from_map(&placement.kind).map(|kind| (placement, kind)))
+        .collect();
+    placements.sort_by_key(|(placement, _)| (placement.y, placement.x));
+    for (placement, kind) in placements {
+        let id = PlacementId {
+            x: placement.x,
+            y: placement.y,
+        };
+        if progress.collected_pickups.contains(&id) {
+            continue;
+        }
+        let color = match kind {
+            PickupKind::Skill(Skill::Projectile) => Color::srgb(0.95, 0.75, 0.12),
+            PickupKind::Skill(Skill::Stun) => Color::srgb(0.65, 0.25, 0.9),
+            PickupKind::Skill(Skill::Teleport) => Color::srgb(0.1, 0.8, 0.7),
+            PickupKind::ReinforcedArmor => Color::srgb(0.45, 0.85, 0.45),
+        };
+        commands.spawn((
+            RunScoped,
+            Placement(id),
+            Pickup {
+                placement: id,
+                kind,
+            },
+            PickupTrigger,
+            Sprite {
+                color,
+                custom_size: Some(Vec2::splat(34.0)),
+                ..default()
+            },
+            Transform::from_translation(map_entity_world_center(placement).extend(1.0)),
+        ));
+    }
+    spawned.0 = true;
+}
+
+fn pickup_message(kind: PickupKind, already_owned: bool) -> &'static str {
+    if already_owned {
+        return "This ability is already acquired.";
+    }
+    match kind {
+        PickupKind::Skill(Skill::Projectile) => {
+            "You have unlocked the long-range attack. Press 2 to select it, or press 3 for automatic range selection. Fire with left click."
+        }
+        PickupKind::Skill(Skill::Stun) => {
+            "You have unlocked stun. Press either Shift key or middle click to stun nearby enemies."
+        }
+        PickupKind::Skill(Skill::Teleport) => {
+            "You have unlocked teleport. Right click valid floor to teleport."
+        }
+        PickupKind::ReinforcedArmor => {
+            "You have unlocked Reinforced Armor. Maximum health increased by 50."
+        }
+    }
+}
+
+fn apply_pickup(
+    kind: PickupKind,
+    progress: &mut RunProgress,
+    health: &mut Health,
+    config: &CombatConfig,
+) -> bool {
+    match kind {
+        PickupKind::Skill(skill) => progress.unlocked_skills.insert(skill),
+        PickupKind::ReinforcedArmor => {
+            progress.armor_collected += 1;
+            progress.maximum_health_bonus += config.reinforced_armor_maximum_health_increase as u32;
+            health.max += config.reinforced_armor_maximum_health_increase;
+            health.current = (health.current + config.reinforced_armor_healing).min(health.max);
+            true
+        }
+    }
+}
+
+fn restored_player_health(config: &CombatConfig, progress: &RunProgress) -> Health {
+    let maximum = config.player_maximum_health + progress.maximum_health_bonus as f32;
+    Health {
+        current: maximum,
+        max: maximum,
+    }
+}
+
+fn activate_touched_pickup(
+    mut commands: Commands,
+    player: Single<(&Transform, &PlayerCollider, &mut Health), With<Player>>,
+    pickups: Query<(Entity, &Pickup, &Transform), With<PickupTrigger>>,
+    terminals: Query<(&Transform, &Terminal), With<TerminalTrigger>>,
+    mut progress: ResMut<RunProgress>,
+    config: Res<CombatConfig>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    let (transform, collider, mut health) = player.into_inner();
+    // Terminal wins every overlap frame, even before deferred trigger removal applies.
+    if terminals.iter().any(|(terminal_transform, _)| {
+        terminal_trigger_overlaps(
+            transform.translation.xy(),
+            collider.0,
+            terminal_transform.translation.xy(),
+            config.terminal_trigger_size,
+        )
+    }) {
+        return;
+    }
+    let selected = pickups
+        .iter()
+        .filter(|(_, _, pickup_transform)| {
+            terminal_trigger_overlaps(
+                transform.translation.xy(),
+                collider.0,
+                pickup_transform.translation.xy(),
+                config.pickup_trigger_size,
+            )
+        })
+        .min_by_key(|(_, pickup, _)| (pickup.placement.y, pickup.placement.x))
+        .map(|(entity, pickup, _)| (entity, *pickup));
+    let Some((entity, pickup)) = selected else {
+        return;
+    };
+    let already_owned = match pickup.kind {
+        PickupKind::Skill(skill) => progress.unlocked_skills.contains(&skill),
+        PickupKind::ReinforcedArmor => false,
+    };
+    progress.collected_pickups.insert(pickup.placement);
+    apply_pickup(pickup.kind, &mut progress, &mut health, &config);
+    commands.entity(entity).despawn();
+    request_dialogue(
+        &mut commands,
+        &mut next_state,
+        vec![DialogueLine {
+            speaker: Speaker::System,
+            text: pickup_message(pickup.kind, already_owned).to_owned(),
+        }],
+        DialogueSource::Unlock,
+    );
+}
+
 fn spawn_enemies_from_map(
     mut commands: Commands,
     game_map: Option<Res<GameMap>>,
@@ -918,12 +1110,18 @@ fn cast_stun(
     mouse: Res<ButtonInput<MouseButton>>,
     mut commands: Commands,
     combat_config: Res<CombatConfig>,
+    progress: Option<Res<RunProgress>>,
     mut shake: ResMut<CameraShakeConfig>,
     player: Single<(&Transform, Option<&PlayerAction>), With<Player>>,
     enemies: Query<(Entity, &Transform, &Hitbox), (With<Enemy>, With<Health>, Without<Dying>)>,
 ) {
     // Firing accepts no gameplay input other than pause (handled separately).
-    if !stun_requested(&keyboard, &mouse) || player.1.is_some() {
+    if !progress
+        .as_ref()
+        .is_none_or(|progress| progress.unlocked_skills.contains(&Skill::Stun))
+        || !stun_requested(&keyboard, &mouse)
+        || player.1.is_some()
+    {
         return;
     }
 
@@ -1137,7 +1335,11 @@ fn setup_player_health_hud(mut commands: Commands, needs_spawn: Res<RunNeedsSpaw
     ));
 }
 
-fn setup_instructions(mut commands: Commands, needs_spawn: Res<RunNeedsSpawn>) {
+fn setup_instructions(
+    mut commands: Commands,
+    needs_spawn: Res<RunNeedsSpawn>,
+    progress: Res<RunProgress>,
+) {
     if !needs_spawn.0 {
         return;
     }
@@ -1145,9 +1347,10 @@ fn setup_instructions(mut commands: Commands, needs_spawn: Res<RunNeedsSpawn>) {
         RunScoped,
         AttackHud,
         Text::new(format_attack_hud(
-            AttackMode::Auto,
+            AttackMode::Lightning,
             None,
             TeleportCooldown::default(),
+            &progress,
         )),
         Node {
             position_type: PositionType::Absolute,
@@ -1485,29 +1688,33 @@ fn format_attack_hud(
     mode: AttackMode,
     rejection: Option<RejectionReason>,
     teleport: TeleportCooldown,
+    progress: &RunProgress,
 ) -> String {
+    let mut controls = String::from("Move: WASD/arrows | Fire: left click");
+    if progress.unlocked_skills.contains(&Skill::Stun) {
+        controls.push_str(" | Stun: Shift/middle click");
+    }
+    if progress.unlocked_skills.contains(&Skill::Teleport) {
+        let status = match teleport.rejection {
+            Some(TeleportRejection::Busy) => "rejected: firing".to_owned(),
+            Some(TeleportRejection::Cooldown) => "rejected: cooling down".to_owned(),
+            Some(TeleportRejection::InvalidTerrain) => "rejected: blocked terrain".to_owned(),
+            None if teleport.ready() => "ready".to_owned(),
+            None => format!("{:.1}s", teleport.remaining),
+        };
+        controls.push_str(&format!(" | Right click: teleport ({status})"));
+    }
+    controls.push_str(" | Modes: 1 Lightning");
+    if progress.unlocked_skills.contains(&Skill::Projectile) {
+        controls.push_str(", 2 Projectile, 3 Auto");
+    }
     let attack_status = match rejection {
         Some(RejectionReason::OutOfRange) => " | Lightning rejected: target out of range",
         Some(RejectionReason::Obstructed) => " | Lightning rejected: terrain blocks the path",
         None => "",
     };
-    let teleport_status = match teleport.rejection {
-        Some(TeleportRejection::Busy) => "Teleport rejected: firing",
-        Some(TeleportRejection::Cooldown) => "Teleport rejected: cooling down",
-        Some(TeleportRejection::InvalidTerrain) => "Teleport rejected: blocked terrain",
-        None if teleport.ready() => "Teleport: ready",
-        None => {
-            return format!(
-                "Move: WASD/arrows | Fire: left click | Stun: Shift/middle click | Right click: teleport ({:.1}s) | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
-                teleport.remaining,
-                mode.label(),
-                attack_status
-            );
-        }
-    };
     format!(
-        "Move: WASD/arrows | Fire: left click | Stun: Shift/middle click | Right click: {} | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
-        teleport_status,
+        "{controls} | Selected: {}{} | Pause: Esc | Debug: F3",
         mode.label(),
         attack_status
     )
@@ -1633,12 +1840,21 @@ fn update_cursor_world_position(
 fn select_attack_mode(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut selected_mode: ResMut<SelectedAttackMode>,
+    progress: Option<Res<RunProgress>>,
 ) {
     if keyboard.just_pressed(KeyCode::Digit1) {
         selected_mode.0 = AttackMode::Lightning;
-    } else if keyboard.just_pressed(KeyCode::Digit2) {
+    } else if keyboard.just_pressed(KeyCode::Digit2)
+        && progress
+            .as_ref()
+            .is_none_or(|progress| progress.unlocked_skills.contains(&Skill::Projectile))
+    {
         selected_mode.0 = AttackMode::Projectile;
-    } else if keyboard.just_pressed(KeyCode::Digit3) {
+    } else if keyboard.just_pressed(KeyCode::Digit3)
+        && progress
+            .as_ref()
+            .is_none_or(|progress| progress.unlocked_skills.contains(&Skill::Projectile))
+    {
         selected_mode.0 = AttackMode::Auto;
     }
 }
@@ -1647,13 +1863,19 @@ fn update_attack_hud(
     selected_mode: Res<SelectedAttackMode>,
     feedback: Res<AttackFeedback>,
     teleport: Res<TeleportCooldown>,
+    progress: Res<RunProgress>,
     mut hud: Single<&mut Text, With<AttackHud>>,
 ) {
-    if selected_mode.is_changed() || feedback.is_changed() || teleport.is_changed() {
+    if selected_mode.is_changed()
+        || feedback.is_changed()
+        || teleport.is_changed()
+        || progress.is_changed()
+    {
         **hud = Text::new(format_attack_hud(
             selected_mode.0,
             feedback.rejection.map(|rejection| rejection.reason),
             *teleport,
+            &progress,
         ));
     }
 }
@@ -1717,6 +1939,7 @@ fn control_character(
     game_map: Res<GameMap>,
     my_animations: Res<PlayerAnimations>,
     selected_mode: Res<SelectedAttackMode>,
+    progress: Option<Res<RunProgress>>,
     combat_config: Res<CombatConfig>,
     cursor_world: Res<CursorWorld>,
     mut feedback: ResMut<AttackFeedback>,
@@ -1726,7 +1949,11 @@ fn control_character(
         character.into_inner();
 
     if action.is_some() {
-        if mouse.just_pressed(MouseButton::Right) {
+        if progress
+            .as_ref()
+            .is_none_or(|progress| progress.unlocked_skills.contains(&Skill::Teleport))
+            && mouse.just_pressed(MouseButton::Right)
+        {
             reject_teleport(&mut teleport, TeleportRejection::Busy);
         }
         return;
@@ -1734,11 +1961,19 @@ fn control_character(
 
     // `cast_stun` runs before this system. Stun wins simultaneous idle input,
     // so a Shift/middle-click cannot also teleport, fire, or move this frame.
-    if stun_requested(&keyboard, &mouse) {
+    if progress
+        .as_ref()
+        .is_none_or(|progress| progress.unlocked_skills.contains(&Skill::Stun))
+        && stun_requested(&keyboard, &mouse)
+    {
         return;
     }
 
-    if mouse.just_pressed(MouseButton::Right) {
+    if progress
+        .as_ref()
+        .is_none_or(|progress| progress.unlocked_skills.contains(&Skill::Teleport))
+        && mouse.just_pressed(MouseButton::Right)
+    {
         if !teleport.ready() {
             reject_teleport(&mut teleport, TeleportRejection::Cooldown);
         } else if let Some(target) = cursor_world.0 {
@@ -2120,12 +2355,16 @@ fn tick_attack_feedback(time: Res<Time>, mut feedback: ResMut<AttackFeedback>) {
 
 fn draw_lightning_range_feedback(
     selected_mode: Res<SelectedAttackMode>,
+    progress: Res<RunProgress>,
     combat_config: Res<CombatConfig>,
     feedback: Res<AttackFeedback>,
     player: Single<&Transform, With<Player>>,
     mut gizmos: Gizmos,
 ) {
-    if matches!(selected_mode.0, AttackMode::Lightning | AttackMode::Auto) {
+    if selected_mode.0 == AttackMode::Lightning
+        || (selected_mode.0 == AttackMode::Auto
+            && progress.unlocked_skills.contains(&Skill::Projectile))
+    {
         gizmos.circle_2d(
             player.translation.xy(),
             combat_config.lightning_range,
@@ -3884,17 +4123,30 @@ mod tests {
             .init_resource::<CameraShakeConfig>()
             .init_resource::<EnemiesSpawned>()
             .init_resource::<TerminalsSpawned>()
+            .init_resource::<PickupsSpawned>()
             .init_resource::<PlayerSpawn>()
             .init_resource::<RunNeedsSpawn>()
             .add_systems(Update, restart_run);
         let old = app.world_mut().spawn(RunScoped).id();
         let checkpoint_id = PlacementId { x: 3, y: -2 };
-        app.world_mut()
-            .resource_mut::<CheckpointSnapshot>()
-            .progress
-            .defeated_enemies
-            .insert(checkpoint_id);
-        app.world_mut().resource_mut::<CheckpointSnapshot>().respawn = checkpoint_id;
+        let checkpoint_pickup = PlacementId { x: 4, y: -2 };
+        let post_checkpoint_pickup = PlacementId { x: 5, y: -2 };
+        {
+            let mut snapshot = app.world_mut().resource_mut::<CheckpointSnapshot>();
+            snapshot.progress.defeated_enemies.insert(checkpoint_id);
+            snapshot
+                .progress
+                .collected_pickups
+                .insert(checkpoint_pickup);
+            snapshot.progress.unlocked_skills.insert(Skill::Stun);
+            snapshot.respawn = checkpoint_id;
+        }
+        // Simulate progress made after the checkpoint; Continue must discard it.
+        {
+            let mut current = app.world_mut().resource_mut::<RunProgress>();
+            current.collected_pickups.insert(post_checkpoint_pickup);
+            current.unlocked_skills.insert(Skill::Teleport);
+        }
         app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::ContinueCheckpoint;
         app.update();
 
@@ -3910,6 +4162,30 @@ mod tests {
             Vec2::new(3.0 * map::TILE_SIZE, -2.0 * map::TILE_SIZE)
         );
         assert!(app.world().resource::<RunNeedsSpawn>().0);
+        assert!(
+            app.world()
+                .resource::<RunProgress>()
+                .collected_pickups
+                .contains(&checkpoint_pickup)
+        );
+        assert!(
+            !app.world()
+                .resource::<RunProgress>()
+                .collected_pickups
+                .contains(&post_checkpoint_pickup)
+        );
+        assert!(
+            app.world()
+                .resource::<RunProgress>()
+                .unlocked_skills
+                .contains(&Skill::Stun)
+        );
+        assert!(
+            !app.world()
+                .resource::<RunProgress>()
+                .unlocked_skills
+                .contains(&Skill::Teleport)
+        );
 
         app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::NewGame;
         app.update();
@@ -3922,6 +4198,363 @@ mod tests {
         assert_eq!(
             *app.world().resource::<CheckpointSnapshot>(),
             CheckpointSnapshot::default()
+        );
+    }
+
+    #[test]
+    fn progression_starts_locked_and_gates_modes_and_hud() {
+        let progress = RunProgress::default();
+        assert!(progress.unlocked_skills.is_empty());
+        assert_eq!(SelectedAttackMode::default().0, AttackMode::Lightning);
+        let hud = format_attack_hud(
+            AttackMode::Lightning,
+            None,
+            TeleportCooldown::default(),
+            &progress,
+        );
+        assert!(!hud.contains("Projectile"));
+        assert!(!hud.contains("Stun:"));
+        assert!(!hud.contains("teleport"));
+
+        let mut unlocked = progress.clone();
+        unlocked.unlocked_skills.insert(Skill::Projectile);
+        unlocked.unlocked_skills.insert(Skill::Stun);
+        unlocked.unlocked_skills.insert(Skill::Teleport);
+        let hud = format_attack_hud(
+            AttackMode::Projectile,
+            None,
+            TeleportCooldown::default(),
+            &unlocked,
+        );
+        assert!(hud.contains("2 Projectile, 3 Auto"));
+        assert!(hud.contains("Stun: Shift/middle click"));
+        assert!(hud.contains("Right click: teleport"));
+        let rejected_teleport_hud = format_attack_hud(
+            AttackMode::Lightning,
+            None,
+            TeleportCooldown {
+                rejection: Some(TeleportRejection::InvalidTerrain),
+                ..default()
+            },
+            &unlocked,
+        );
+        assert!(rejected_teleport_hud.contains("rejected: blocked terrain"));
+    }
+
+    #[test]
+    fn pickups_are_one_shot_with_exact_messages_and_armor_health_effect() {
+        let config = CombatConfig::default();
+        let mut progress = RunProgress::default();
+        let mut health = Health {
+            current: 40.0,
+            max: 100.0,
+        };
+        assert!(apply_pickup(
+            PickupKind::Skill(Skill::Projectile),
+            &mut progress,
+            &mut health,
+            &config
+        ));
+        assert!(!apply_pickup(
+            PickupKind::Skill(Skill::Projectile),
+            &mut progress,
+            &mut health,
+            &config
+        ));
+        assert!(progress.unlocked_skills.contains(&Skill::Projectile));
+        assert_eq!(
+            pickup_message(PickupKind::Skill(Skill::Projectile), false),
+            "You have unlocked the long-range attack. Press 2 to select it, or press 3 for automatic range selection. Fire with left click."
+        );
+        assert_eq!(
+            pickup_message(PickupKind::Skill(Skill::Stun), false),
+            "You have unlocked stun. Press either Shift key or middle click to stun nearby enemies."
+        );
+        assert_eq!(
+            pickup_message(PickupKind::Skill(Skill::Teleport), false),
+            "You have unlocked teleport. Right click valid floor to teleport."
+        );
+        assert_eq!(
+            pickup_message(PickupKind::ReinforcedArmor, false),
+            "You have unlocked Reinforced Armor. Maximum health increased by 50."
+        );
+        assert!(apply_pickup(
+            PickupKind::ReinforcedArmor,
+            &mut progress,
+            &mut health,
+            &config
+        ));
+        assert_eq!(
+            health,
+            Health {
+                current: 90.0,
+                max: 150.0
+            }
+        );
+        assert_eq!(progress.maximum_health_bonus, 50);
+        let mut full_health = Health {
+            current: 100.0,
+            max: 100.0,
+        };
+        let mut full_progress = RunProgress::default();
+        apply_pickup(
+            PickupKind::ReinforcedArmor,
+            &mut full_progress,
+            &mut full_health,
+            &config,
+        );
+        assert_eq!(
+            full_health,
+            Health {
+                current: 150.0,
+                max: 150.0
+            }
+        );
+    }
+
+    #[test]
+    fn locked_modes_and_abilities_are_silent_until_unlocked() {
+        let mut mode_app = App::new();
+        mode_app
+            .add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<SelectedAttackMode>()
+            .init_resource::<RunProgress>()
+            .add_systems(Update, select_attack_mode);
+        mode_app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit2);
+        mode_app.update();
+        assert_eq!(
+            mode_app.world().resource::<SelectedAttackMode>().0,
+            AttackMode::Lightning
+        );
+        mode_app
+            .world_mut()
+            .insert_resource(ButtonInput::<KeyCode>::default());
+        mode_app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit3);
+        mode_app.update();
+        assert_eq!(
+            mode_app.world().resource::<SelectedAttackMode>().0,
+            AttackMode::Lightning
+        );
+        mode_app
+            .world_mut()
+            .insert_resource(ButtonInput::<KeyCode>::default());
+        mode_app
+            .world_mut()
+            .resource_mut::<RunProgress>()
+            .unlocked_skills
+            .insert(Skill::Projectile);
+        mode_app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit2);
+        mode_app.update();
+        assert_eq!(
+            mode_app.world().resource::<SelectedAttackMode>().0,
+            AttackMode::Projectile
+        );
+        mode_app
+            .world_mut()
+            .insert_resource(ButtonInput::<KeyCode>::default());
+        mode_app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit3);
+        mode_app.update();
+        assert_eq!(
+            mode_app.world().resource::<SelectedAttackMode>().0,
+            AttackMode::Auto
+        );
+
+        let mut stun_app = App::new();
+        stun_app
+            .add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<CombatConfig>()
+            .init_resource::<CameraShakeConfig>()
+            .init_resource::<RunProgress>()
+            .add_systems(Update, cast_stun);
+        stun_app.world_mut().spawn((Player, Transform::default()));
+        stun_app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        stun_app.update();
+        assert_eq!(stun_app.world().resource::<CameraShakeConfig>().trauma, 0.0);
+        assert_eq!(
+            stun_app
+                .world_mut()
+                .query::<&ShockwaveVisual>()
+                .iter(stun_app.world())
+                .count(),
+            0
+        );
+
+        let mut teleport_app = App::new();
+        teleport_app
+            .add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .insert_resource(GameMap(flat_test_map()))
+            .insert_resource(test_player_animations())
+            .init_resource::<SelectedAttackMode>()
+            .init_resource::<CombatConfig>()
+            .insert_resource(CursorWorld(Some(Vec2::new(10.0, 0.0))))
+            .init_resource::<AttackFeedback>()
+            .init_resource::<TeleportCooldown>()
+            .init_resource::<RunProgress>()
+            .add_systems(Update, control_character);
+        let player = teleport_app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
+                Facing::Right,
+                SpritesheetAnimation::new(Handle::default()),
+                Transform::from_xyz(0.0, 0.0, 2.0),
+            ))
+            .id();
+        teleport_app
+            .world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        teleport_app.update();
+        assert_eq!(
+            teleport_app
+                .world()
+                .entity(player)
+                .get::<Transform>()
+                .unwrap()
+                .translation
+                .xy(),
+            Vec2::ZERO
+        );
+        assert!(teleport_app.world().resource::<TeleportCooldown>().ready());
+        assert_eq!(
+            teleport_app
+                .world()
+                .resource::<TeleportCooldown>()
+                .rejection,
+            None
+        );
+        assert!(
+            !teleport_app
+                .world()
+                .entity(player)
+                .contains::<PlayerAction>()
+        );
+    }
+
+    #[test]
+    fn pickup_trigger_is_one_shot_and_terminals_win_shared_overlaps() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .init_resource::<CombatConfig>()
+            .init_resource::<RunProgress>()
+            .add_systems(Update, activate_touched_pickup);
+        let pickup_id = PlacementId { x: 1, y: 1 };
+        let pickup = app
+            .world_mut()
+            .spawn((
+                Pickup {
+                    placement: pickup_id,
+                    kind: PickupKind::Skill(Skill::Stun),
+                },
+                PickupTrigger,
+                Transform::default(),
+            ))
+            .id();
+        let terminal = app
+            .world_mut()
+            .spawn((
+                Terminal {
+                    placement: PlacementId::default(),
+                    dialogue_id: "intro".into(),
+                    activated: false,
+                },
+                TerminalTrigger,
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Player,
+            PlayerCollider(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+            Health {
+                current: 100.0,
+                max: 100.0,
+            },
+            Transform::default(),
+        ));
+        app.update();
+        assert!(app.world().get_entity(pickup).is_ok());
+        assert!(
+            !app.world()
+                .resource::<RunProgress>()
+                .collected_pickups
+                .contains(&pickup_id)
+        );
+
+        app.world_mut().despawn(terminal);
+        app.update();
+        assert!(app.world().get_entity(pickup).is_err());
+        assert!(
+            app.world()
+                .resource::<RunProgress>()
+                .collected_pickups
+                .contains(&pickup_id)
+        );
+        assert!(
+            app.world()
+                .resource::<RunProgress>()
+                .unlocked_skills
+                .contains(&Skill::Stun)
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<RunProgress>()
+                .collected_pickups
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn checkpoint_progress_restores_pickups_and_full_armor_health() {
+        let config = CombatConfig::default();
+        let pickup = PlacementId { x: 2, y: 3 };
+        let mut checkpoint_progress = RunProgress::default();
+        checkpoint_progress.collected_pickups.insert(pickup);
+        checkpoint_progress.unlocked_skills.insert(Skill::Stun);
+        checkpoint_progress.maximum_health_bonus = 50;
+        let snapshot = CheckpointSnapshot {
+            progress: checkpoint_progress.clone(),
+            respawn: PlacementId::default(),
+        };
+        let restored = snapshot.progress.clone();
+        assert!(restored.collected_pickups.contains(&pickup));
+        assert!(restored.unlocked_skills.contains(&Skill::Stun));
+        assert_eq!(
+            restored_player_health(&config, &restored),
+            Health {
+                current: 150.0,
+                max: 150.0
+            }
+        );
+        assert_eq!(
+            restored_player_health(&config, &RunProgress::default()),
+            Health {
+                current: 100.0,
+                max: 100.0
+            }
         );
     }
 }
