@@ -24,6 +24,7 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<SelectedAttackMode>()
         .init_resource::<CursorWorld>()
         .init_resource::<AttackFeedback>()
+        .init_resource::<TeleportCooldown>()
         .init_resource::<EnemiesSpawned>()
         .add_message::<AttackFired>()
         .add_systems(PreStartup, setup_enemy_animations)
@@ -38,6 +39,7 @@ pub fn game_plugin(app: &mut App) {
         (
             update_cursor_world_position,
             select_attack_mode,
+            tick_teleport_cooldown,
             control_character,
             trigger_attack_fire_event,
             handle_lightning_attacks,
@@ -171,6 +173,7 @@ struct CombatConfig {
     enemy_maximum_health: f32,
     enemy_speed: f32,
     enemy_attack_distance: f32,
+    teleport_cooldown: f32,
 }
 
 impl Default for CombatConfig {
@@ -186,6 +189,7 @@ impl Default for CombatConfig {
             enemy_maximum_health: 100.0,
             enemy_speed: 55.0,
             enemy_attack_distance: 64.0,
+            teleport_cooldown: 5.0,
         }
     }
 }
@@ -235,6 +239,26 @@ struct AttackRejection {
 enum RejectionReason {
     OutOfRange,
     Obstructed,
+}
+
+#[derive(Resource, Clone, Copy, Debug, Default)]
+struct TeleportCooldown {
+    remaining: f32,
+    rejection: Option<TeleportRejection>,
+    rejection_remaining: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TeleportRejection {
+    Busy,
+    Cooldown,
+    InvalidTerrain,
+}
+
+impl TeleportCooldown {
+    fn ready(self) -> bool {
+        self.remaining <= 0.0
+    }
 }
 
 #[derive(Component)]
@@ -713,7 +737,11 @@ fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitia
 
     commands.spawn((
         AttackHud,
-        Text::new(format_attack_hud(AttackMode::Auto, None)),
+        Text::new(format_attack_hud(
+            AttackMode::Auto,
+            None,
+            TeleportCooldown::default(),
+        )),
         Node {
             position_type: PositionType::Absolute,
             bottom: px(12),
@@ -991,16 +1019,35 @@ fn attack_direction_and_facing(
     }
 }
 
-fn format_attack_hud(mode: AttackMode, rejection: Option<RejectionReason>) -> String {
-    let status = match rejection {
+fn format_attack_hud(
+    mode: AttackMode,
+    rejection: Option<RejectionReason>,
+    teleport: TeleportCooldown,
+) -> String {
+    let attack_status = match rejection {
         Some(RejectionReason::OutOfRange) => " | Lightning rejected: target out of range",
         Some(RejectionReason::Obstructed) => " | Lightning rejected: terrain blocks the path",
         None => "",
     };
+    let teleport_status = match teleport.rejection {
+        Some(TeleportRejection::Busy) => "Teleport rejected: firing",
+        Some(TeleportRejection::Cooldown) => "Teleport rejected: cooling down",
+        Some(TeleportRejection::InvalidTerrain) => "Teleport rejected: blocked terrain",
+        None if teleport.ready() => "Teleport: ready",
+        None => {
+            return format!(
+                "Move: WASD/arrows | Fire: left click | Right click: teleport ({:.1}s) | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
+                teleport.remaining,
+                mode.label(),
+                attack_status
+            );
+        }
+    };
     format!(
-        "Move: WASD/arrows | Fire: left click | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
+        "Move: WASD/arrows | Fire: left click | Right click: {} | Modes: 1 Lightning, 2 Projectile, 3 Auto | Selected: {}{} | Pause: Esc | Debug: F3",
+        teleport_status,
         mode.label(),
-        status
+        attack_status
     )
 }
 
@@ -1137,14 +1184,43 @@ fn select_attack_mode(
 fn update_attack_hud(
     selected_mode: Res<SelectedAttackMode>,
     feedback: Res<AttackFeedback>,
+    teleport: Res<TeleportCooldown>,
     mut hud: Single<&mut Text, With<AttackHud>>,
 ) {
-    if selected_mode.is_changed() || feedback.is_changed() {
+    if selected_mode.is_changed() || feedback.is_changed() || teleport.is_changed() {
         **hud = Text::new(format_attack_hud(
             selected_mode.0,
             feedback.rejection.map(|rejection| rejection.reason),
+            *teleport,
         ));
     }
+}
+
+/// Resolves a clicked foot-collider center to the player transform position.
+fn teleport_destination(
+    foot_center: Vec2,
+    collider: Collider,
+    occupancy: &collision::Occupancy<'_>,
+) -> Option<Vec2> {
+    let player_position = foot_center - collider.offset;
+    collision::can_occupy(player_position, collider, occupancy).then_some(player_position)
+}
+
+fn advance_teleport_cooldown(teleport: &mut TeleportCooldown, delta_secs: f32) {
+    teleport.remaining = (teleport.remaining - delta_secs).max(0.0);
+    teleport.rejection_remaining -= delta_secs;
+    if teleport.rejection_remaining <= 0.0 {
+        teleport.rejection = None;
+    }
+}
+
+fn tick_teleport_cooldown(time: Res<Time>, mut teleport: ResMut<TeleportCooldown>) {
+    advance_teleport_cooldown(&mut teleport, time.delta_secs());
+}
+
+fn reject_teleport(teleport: &mut TeleportCooldown, rejection: TeleportRejection) {
+    teleport.rejection = Some(rejection);
+    teleport.rejection_remaining = 0.45;
 }
 
 fn move_with_collision(
@@ -1182,11 +1258,31 @@ fn control_character(
     combat_config: Res<CombatConfig>,
     cursor_world: Res<CursorWorld>,
     mut feedback: ResMut<AttackFeedback>,
+    mut teleport: ResMut<TeleportCooldown>,
 ) {
     let (entity, mut animation, mut transform, mut facing, collider, action) =
         character.into_inner();
 
     if action.is_some() {
+        if mouse.just_pressed(MouseButton::Right) {
+            reject_teleport(&mut teleport, TeleportRejection::Busy);
+        }
+        return;
+    }
+
+    if mouse.just_pressed(MouseButton::Right) {
+        if !teleport.ready() {
+            reject_teleport(&mut teleport, TeleportRejection::Cooldown);
+        } else if let Some(target) = cursor_world.0 {
+            let occupancy = collision::Occupancy::terrain_only(&game_map.0);
+            if let Some(destination) = teleport_destination(target, collider.0, &occupancy) {
+                transform.translation = destination.extend(transform.translation.z);
+                teleport.remaining = combat_config.teleport_cooldown;
+                teleport.rejection = None;
+            } else {
+                reject_teleport(&mut teleport, TeleportRejection::InvalidTerrain);
+            }
+        }
         return;
     }
 
@@ -2446,6 +2542,70 @@ mod tests {
     }
 
     #[test]
+    fn teleport_uses_shared_occupancy_and_ignores_entities() {
+        let collider = Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET);
+        let mut map = floor_rect(-1..=1, -1..=1);
+        let occupancy = collision::Occupancy::terrain_only(&map);
+        assert_eq!(
+            teleport_destination(Vec2::ZERO, collider, &occupancy),
+            Some(-collider.offset),
+            "the clicked point is the feet collider center, not the player sprite origin"
+        );
+
+        map.set(1, 0, map::TerrainTile::Wall);
+        let occupancy = collision::Occupancy::terrain_only(&map);
+        assert_eq!(
+            teleport_destination(Vec2::new(map::TILE_SIZE, 0.0), collider, &occupancy),
+            None
+        );
+        assert_eq!(
+            teleport_destination(Vec2::new(map::TILE_SIZE / 2.0, 0.0), collider, &occupancy),
+            None,
+            "a collider overlapping a wall cannot teleport near its edge"
+        );
+
+        map.remove(0, 1);
+        let occupancy = collision::Occupancy::terrain_only(&map);
+        assert_eq!(
+            teleport_destination(Vec2::new(0.0, map::TILE_SIZE), collider, &occupancy),
+            None,
+            "missing sparse terrain blocks teleport"
+        );
+
+        let edge_map = floor_rect(0..=0, 0..=0);
+        let occupancy = collision::Occupancy::terrain_only(&edge_map);
+        let tile_sized = Collider::new(Vec2::splat(map::TILE_SIZE), Vec2::ZERO);
+        assert_eq!(
+            teleport_destination(Vec2::ZERO, tile_sized, &occupancy),
+            Some(Vec2::ZERO)
+        );
+
+        // Occupancy deliberately contains terrain only, so enemy/entity overlap is allowed.
+        let enemy_position = Vec2::ZERO;
+        assert_eq!(
+            teleport_destination(enemy_position, collider, &occupancy),
+            Some(enemy_position - collider.offset)
+        );
+    }
+
+    #[test]
+    fn teleport_cooldown_ticks_to_readiness_and_reports_busy_rejection() {
+        let mut cooldown = TeleportCooldown {
+            remaining: 5.0,
+            ..default()
+        };
+        advance_teleport_cooldown(&mut cooldown, 2.0);
+        assert_eq!(cooldown.remaining, 3.0);
+        advance_teleport_cooldown(&mut cooldown, 2.0);
+        assert_eq!(cooldown.remaining, 1.0);
+        advance_teleport_cooldown(&mut cooldown, 2.0);
+        assert!(cooldown.ready());
+
+        reject_teleport(&mut cooldown, TeleportRejection::Busy);
+        assert_eq!(cooldown.rejection, Some(TeleportRejection::Busy));
+    }
+
+    #[test]
     fn click_creates_one_fire_event_and_locks_movement_until_animation_completion() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -2459,6 +2619,7 @@ mod tests {
             .insert_resource(CombatConfig::default())
             .insert_resource(CursorWorld(Some(Vec2::new(10.0, 0.0))))
             .init_resource::<AttackFeedback>()
+            .init_resource::<TeleportCooldown>()
             .init_resource::<FireCount>()
             .add_systems(
                 Update,
@@ -2499,6 +2660,18 @@ mod tests {
 
         assert!(app.world().entity(player).contains::<PlayerAction>());
         assert_eq!(app.world().resource::<FireCount>().0, 0);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        app.update();
+        assert_eq!(
+            app.world().resource::<TeleportCooldown>().rejection,
+            Some(TeleportRejection::Busy)
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear_just_pressed(MouseButton::Right);
 
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()

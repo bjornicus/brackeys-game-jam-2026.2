@@ -223,13 +223,13 @@ For headless ECS tests, construct a minimal `App`, add only required plugins/res
 
 **Goal:** Right-click teleport safely and make its five-second cooldown understandable.
 
-- [ ] Add `TeleportCooldown` state driven by `CombatConfig.teleport_cooldown`.
-- [ ] On right-button `just_pressed`, convert cursor to world coordinates and call the exact same occupancy operation and player collider used for normal movement.
-- [ ] A valid ready teleport sets player position directly to the clicked point and starts cooldown.
-- [ ] Invalid terrain, missing terrain, or active cooldown leaves position unchanged and provides brief visual/HUD feedback.
-- [ ] Entities do not block teleport now. Keep the shared occupancy API ready for future movement-blocking entities rather than writing a teleport-only terrain check.
-- [ ] Decide action interaction explicitly: default behavior is to reject teleport while firing; teleport itself does not play the firing animation.
-- [ ] Show ready state or remaining cooldown in the HUD.
+- [x] Add `TeleportCooldown` state driven by `CombatConfig.teleport_cooldown`.
+- [x] On right-button `just_pressed`, convert cursor to world coordinates and call the exact same occupancy operation and player collider used for normal movement.
+- [x] A valid ready teleport sets player position directly to the clicked point and starts cooldown.
+- [x] Invalid terrain, missing terrain, or active cooldown leaves position unchanged and provides brief visual/HUD feedback.
+- [x] Entities do not block teleport now. Keep the shared occupancy API ready for future movement-blocking entities rather than writing a teleport-only terrain check.
+- [x] Decide action interaction explicitly: default behavior is to reject teleport while firing; teleport itself does not play the firing animation.
+- [x] Show ready state or remaining cooldown in the HUD.
 
 **Automated acceptance:** Tests cover valid floor, wall, sparse gap, near-wall collider overlap, exact edge contact, entity overlap allowed, cooldown start/tick/readiness, and rejection while busy.
 
@@ -317,3 +317,4 @@ Add one short entry per completed step, for example:
 - `Step 6 — 2026-08-28`: Added placeholder projectile spawning from projectile fire events, swept circle/AABB movement against terrain and hitboxes, earliest-impact resolution, owner/same-faction filtering, damage/despawn behavior, lifetime cleanup, and projectile coverage tests. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game projectile`, `cargo test`, and `cargo check --all-targets` passed. Manual projectile smoke not run.
 - `Step 7 — 2026-08-28`: Spawned map-placed placeholder enemies with shared terrain movement, chase/attack-distance behavior, generic combat health/hitboxes, and F3 collider/hitbox visualization. Added headless spawn, movement, and damage tests. Fixed enemy/player query disjointness and filtered attack animation systems explicitly to the player so animated enemies cannot make their `Single` queries ambiguous. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test --bin game enemy`, `cargo test`, and `cargo check --all-targets` passed. Manual enemy spawn/chase/collision/attack smoke not run.
 - `Step 8 — 2026-08-28`: Added child-sprite enemy health bars with clamped fills, timed reset-on-reapply stun state, state-priority animation selection, and deferred dying/death-animation cleanup that removes combat/movement components and recursively despawns bars. Added headless coverage for health ratios, stunned movement, and death transitions. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Final validation: `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual health-bar/stun/death smoke not run.
+- `Step 9 — 2026-08-28`: Added right-click teleport using the shared terrain occupancy and player collider, positioning the player so the clicked point is the feet-collider center, plus five-second configurable cooldown, HUD ready/countdown/rejection feedback, and explicit firing-state rejection. Added coverage for floor/wall/sparse/edge/near-wall/entity-overlap occupancy, cooldown ticking, and busy rejection. Files changed: `src/game.rs`, `ATTACK_PLAN.md`. Baseline before editing and final validation: `cargo fmt --check`, `cargo test --bin game teleport`, `cargo test`, and `cargo check --all-targets` passed. Manual teleport smoke not run: teleport around open floor and wall edges; verify invalid terrain does nothing, enemy overlap is allowed, and cooldown becomes ready after five seconds.
