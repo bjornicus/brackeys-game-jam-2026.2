@@ -5,6 +5,7 @@ use bevy::{app::AppExit, prelude::*, window::PrimaryWindow};
 use bevy_spritesheet_animation::prelude::*;
 use map_support::{
     collision::{self, Collider},
+    dialogue::{DialogueCatalog, DialogueLine, Speaker, load_dialogue_catalog},
     map,
     progression::{CheckpointSnapshot, PlacementId, RunProgress},
     tilemap::{self, TerrainAtlas, TerrainTilemapPlugin},
@@ -19,6 +20,7 @@ const PAUSE_BUTTON_PRESSED: Color = Color::srgb(0.12, 0.65, 0.35);
 use crate::{
     GameState,
     config::{CameraShakeConfig, CombatConfig},
+    game_dialogue::{DialogueSource, request_dialogue},
 };
 
 // This plugin contains the game.
@@ -32,6 +34,8 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<TeleportCooldown>()
         .init_resource::<CameraShakeConfig>()
         .init_resource::<EnemiesSpawned>()
+        .init_resource::<TerminalsSpawned>()
+        .insert_resource(StoryDialogueCatalog::load())
         .init_resource::<RestartRequest>()
         .init_resource::<RunProgress>()
         .init_resource::<CheckpointSnapshot>()
@@ -62,6 +66,7 @@ pub fn game_plugin(app: &mut App) {
             select_attack_mode,
             tick_teleport_cooldown,
             control_character,
+            activate_touched_terminal,
             trigger_attack_fire_event,
             handle_lightning_attacks,
             spawn_projectiles,
@@ -100,6 +105,7 @@ pub fn game_plugin(app: &mut App) {
         Update,
         (
             spawn_enemies_from_map,
+            spawn_terminals_from_map,
             attach_enemy_sprites,
             spawn_enemy_health_bars,
             tick_stunned_enemies,
@@ -189,6 +195,19 @@ struct EnemyHealthBarFill;
 #[derive(Resource, Default)]
 struct EnemiesSpawned(bool);
 
+#[derive(Resource, Default)]
+struct TerminalsSpawned(bool);
+
+#[derive(Component, Clone, Debug)]
+struct Terminal {
+    placement: PlacementId,
+    dialogue_id: String,
+    activated: bool,
+}
+
+#[derive(Component)]
+struct TerminalTrigger;
+
 #[derive(Resource)]
 struct EnemyAnimations {
     idle: Handle<Animation>,
@@ -199,6 +218,21 @@ struct EnemyAnimations {
 
 #[derive(Resource)]
 struct GameMap(map::MapData);
+
+#[derive(Resource, Default)]
+struct StoryDialogueCatalog(DialogueCatalog);
+
+impl StoryDialogueCatalog {
+    fn load() -> Self {
+        match load_dialogue_catalog("story") {
+            Ok(catalog) => Self(catalog),
+            Err(error) => {
+                warn!("Could not load story dialogue catalog: {error}");
+                Self::default()
+            }
+        }
+    }
+}
 
 #[allow(dead_code)] // Step 5/7 consume this stable identity.
 #[derive(Component, Clone, Copy, Debug)]
@@ -489,6 +523,7 @@ fn restart_run(
     mut collision_debug: ResMut<CollisionDebug>,
     mut shake: ResMut<CameraShakeConfig>,
     mut enemies_spawned: ResMut<EnemiesSpawned>,
+    mut terminals_spawned: ResMut<TerminalsSpawned>,
     mut player_spawn: ResMut<PlayerSpawn>,
     mut needs_spawn: ResMut<RunNeedsSpawn>,
     mut cameras: Query<(&UnshakenCameraTransform, &mut Transform), With<Camera2d>>,
@@ -506,6 +541,7 @@ fn restart_run(
     *collision_debug = CollisionDebug::default();
     shake.trauma = 0.0;
     enemies_spawned.0 = false;
+    terminals_spawned.0 = false;
     needs_spawn.0 = true;
 
     match intent.0 {
@@ -620,11 +656,164 @@ fn spawn_character(
     ));
 }
 
-fn enemy_spawn_position(entity: &map::MapEntity) -> Vec2 {
+/// Returns the center of an entity's map tile in world coordinates.
+fn map_entity_world_center(entity: &map::MapEntity) -> Vec2 {
     Vec2::new(
         entity.x as f32 * map::TILE_SIZE,
         entity.y as f32 * map::TILE_SIZE,
     )
+}
+
+fn enemy_spawn_position(entity: &map::MapEntity) -> Vec2 {
+    map_entity_world_center(entity)
+}
+
+fn spawn_terminals_from_map(
+    mut commands: Commands,
+    game_map: Option<Res<GameMap>>,
+    progress: Res<RunProgress>,
+    mut spawned: ResMut<TerminalsSpawned>,
+) {
+    if spawned.0 {
+        return;
+    }
+    let Some(game_map) = game_map else {
+        return;
+    };
+
+    let mut placements: Vec<_> = game_map
+        .0
+        .entities
+        .iter()
+        .filter(|placement| matches!(placement.kind, map::MapEntityKind::Terminal { .. }))
+        .collect();
+    placements.sort_by_key(|placement| (placement.y, placement.x));
+    for placement in placements {
+        let map::MapEntityKind::Terminal { dialogue_id } = &placement.kind else {
+            unreachable!("terminal filter must retain only terminal placements");
+        };
+        let identity = PlacementId {
+            x: placement.x,
+            y: placement.y,
+        };
+        let activated = terminal_is_activated(&progress, identity);
+        let mut entity = commands.spawn((
+            RunScoped,
+            Placement(identity),
+            Terminal {
+                placement: identity,
+                dialogue_id: dialogue_id.clone(),
+                activated,
+            },
+            Sprite {
+                color: if activated {
+                    Color::srgb(0.12, 0.18, 0.24)
+                } else {
+                    Color::srgb(0.15, 0.7, 1.0)
+                },
+                custom_size: Some(Vec2::new(48.0, 64.0)),
+                ..default()
+            },
+            Transform::from_translation(map_entity_world_center(placement).extend(1.0)),
+        ));
+        if !activated {
+            entity.insert(TerminalTrigger);
+        }
+    }
+    spawned.0 = true;
+}
+
+fn terminal_is_activated(progress: &RunProgress, placement: PlacementId) -> bool {
+    progress.activated_terminals.contains(&placement)
+}
+
+fn commit_terminal_activation(
+    terminal: &mut Terminal,
+    progress: &mut RunProgress,
+    checkpoint: &mut CheckpointSnapshot,
+) {
+    terminal.activated = true;
+    progress.activated_terminals.insert(terminal.placement);
+    checkpoint.progress = progress.clone();
+    checkpoint.respawn = terminal.placement;
+}
+
+fn terminal_dialogue_lines(catalog: &DialogueCatalog, dialogue_id: &str) -> Vec<DialogueLine> {
+    match catalog.conversation(dialogue_id) {
+        Ok(lines) => lines.to_vec(),
+        Err(error) => {
+            error!("Terminal dialogue ID '{dialogue_id}' could not be opened: {error}");
+            vec![DialogueLine {
+                speaker: Speaker::System,
+                text: format!("Terminal dialogue '{dialogue_id}' is unavailable."),
+            }]
+        }
+    }
+}
+
+/// Trigger contact includes exact AABB boundary contact.
+fn terminal_trigger_overlaps(
+    player_position: Vec2,
+    player_collider: Collider,
+    terminal_position: Vec2,
+    trigger_size: Vec2,
+) -> bool {
+    let player = player_collider.aabb_at(player_position);
+    let trigger = collision::Aabb::from_center_size(terminal_position, trigger_size);
+    player.min.x <= trigger.max.x
+        && player.max.x >= trigger.min.x
+        && player.min.y <= trigger.max.y
+        && player.max.y >= trigger.min.y
+}
+
+fn activate_touched_terminal(
+    mut commands: Commands,
+    player: Single<(&Transform, &PlayerCollider), With<Player>>,
+    mut terminal_queries: ParamSet<(
+        Query<(Entity, &Terminal, &Transform), With<TerminalTrigger>>,
+        Query<(&mut Terminal, &mut Sprite)>,
+    )>,
+    mut progress: ResMut<RunProgress>,
+    mut checkpoint: ResMut<CheckpointSnapshot>,
+    catalog: Res<StoryDialogueCatalog>,
+    combat_config: Res<CombatConfig>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    let (player_transform, player_collider) = *player;
+    let player_position = player_transform.translation.xy();
+    let selected = terminal_queries
+        .p0()
+        .iter()
+        .filter(|(_, _, transform)| {
+            terminal_trigger_overlaps(
+                player_position,
+                player_collider.0,
+                transform.translation.xy(),
+                combat_config.terminal_trigger_size,
+            )
+        })
+        .map(|(entity, terminal, _)| (entity, terminal.placement, terminal.dialogue_id.clone()))
+        .min_by_key(|(_, placement, _)| (placement.y, placement.x));
+    let Some((entity, _placement, dialogue_id)) = selected else {
+        return;
+    };
+
+    let lines = terminal_dialogue_lines(&catalog.0, &dialogue_id);
+
+    let mut terminal_state = terminal_queries.p1();
+    let Ok((mut terminal, mut sprite)) = terminal_state.get_mut(entity) else {
+        return;
+    };
+    // This ordering deliberately commits the checkpoint before requesting the modal.
+    commit_terminal_activation(&mut terminal, &mut progress, &mut checkpoint);
+    sprite.color = Color::srgb(0.12, 0.18, 0.24);
+    commands.entity(entity).remove::<TerminalTrigger>();
+    request_dialogue(
+        &mut commands,
+        &mut next_state,
+        lines,
+        DialogueSource::Terminal,
+    );
 }
 
 fn spawn_enemies_from_map(
@@ -3535,6 +3724,152 @@ mod tests {
     }
 
     #[test]
+    fn terminal_touch_includes_exact_trigger_boundary() {
+        let collider = Collider::new(Vec2::new(40.0, 20.0), Vec2::ZERO);
+        // Trigger right edge 28 and player left edge 28 meet exactly.
+        assert!(terminal_trigger_overlaps(
+            Vec2::new(48.0, 0.0),
+            collider,
+            Vec2::ZERO,
+            Vec2::splat(56.0)
+        ));
+        assert!(!terminal_trigger_overlaps(
+            Vec2::new(48.01, 0.0),
+            collider,
+            Vec2::ZERO,
+            Vec2::splat(56.0)
+        ));
+    }
+
+    #[test]
+    fn terminal_activation_commits_checkpoint_before_dialogue_request() {
+        let placement = PlacementId { x: 3, y: -2 };
+        let mut terminal = Terminal {
+            placement,
+            dialogue_id: "terminal_intro".into(),
+            activated: false,
+        };
+        let mut progress = RunProgress::default();
+        progress
+            .collected_pickups
+            .insert(PlacementId { x: 1, y: 1 });
+        let mut checkpoint = CheckpointSnapshot::default();
+
+        commit_terminal_activation(&mut terminal, &mut progress, &mut checkpoint);
+
+        assert!(terminal.activated);
+        assert!(terminal_is_activated(&progress, placement));
+        assert_eq!(checkpoint.respawn, placement);
+        assert_eq!(checkpoint.progress, progress);
+        assert!(
+            checkpoint
+                .progress
+                .collected_pickups
+                .contains(&PlacementId { x: 1, y: 1 })
+        );
+    }
+
+    #[test]
+    fn terminal_catalog_fallback_is_a_system_line_and_restored_terminals_stay_inactive() {
+        let catalog = DialogueCatalog::default();
+        let lines = terminal_dialogue_lines(&catalog, "missing_terminal");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].speaker, Speaker::System);
+        assert!(lines[0].text.contains("missing_terminal"));
+
+        let placement = PlacementId { x: 2, y: 4 };
+        let mut progress = RunProgress::default();
+        progress.activated_terminals.insert(placement);
+        assert!(terminal_is_activated(&progress, placement));
+        assert!(!terminal_is_activated(
+            &progress,
+            PlacementId { x: 2, y: 5 }
+        ));
+    }
+
+    #[test]
+    fn terminal_touch_activates_once_and_opens_dialogue_after_checkpoint_capture() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .init_resource::<CombatConfig>()
+            .init_resource::<RunProgress>()
+            .init_resource::<CheckpointSnapshot>()
+            .insert_resource(StoryDialogueCatalog(DialogueCatalog {
+                conversations: std::collections::BTreeMap::from([(
+                    "intro".into(),
+                    vec![DialogueLine {
+                        speaker: Speaker::NoOne,
+                        text: "checkpoint first".into(),
+                    }],
+                )]),
+            }))
+            .add_systems(Update, activate_touched_terminal);
+        let placement = PlacementId { x: 1, y: 0 };
+        let terminal = app
+            .world_mut()
+            .spawn((
+                Terminal {
+                    placement,
+                    dialogue_id: "intro".into(),
+                    activated: false,
+                },
+                TerminalTrigger,
+                Sprite::default(),
+                Transform::from_translation(Vec3::new(20.0, 0.0, 1.0)),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Player,
+            PlayerCollider(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+            Transform::default(),
+        ));
+
+        app.update();
+        assert!(
+            app.world()
+                .entity(terminal)
+                .get::<Terminal>()
+                .unwrap()
+                .activated
+        );
+        assert!(!app.world().entity(terminal).contains::<TerminalTrigger>());
+        assert_eq!(
+            app.world().resource::<CheckpointSnapshot>().respawn,
+            placement
+        );
+        assert!(
+            app.world()
+                .resource::<crate::game_dialogue::ActiveDialogue>()
+                .lines
+                .first()
+                .is_some_and(|line| line.text == "checkpoint first")
+        );
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<RunProgress>()
+                .activated_terminals
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn terminal_order_is_deterministic_by_tile() {
+        let overlapping = [
+            PlacementId { x: 4, y: 0 },
+            PlacementId { x: -1, y: -1 },
+            PlacementId { x: 0, y: -1 },
+        ];
+        assert_eq!(
+            overlapping.into_iter().min_by_key(|id| (id.y, id.x)),
+            Some(PlacementId { x: -1, y: -1 })
+        );
+    }
+
+    #[test]
     fn restart_rebuild_paths_remove_run_entities_and_choose_progress() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
@@ -3548,6 +3883,7 @@ mod tests {
             .init_resource::<CollisionDebug>()
             .init_resource::<CameraShakeConfig>()
             .init_resource::<EnemiesSpawned>()
+            .init_resource::<TerminalsSpawned>()
             .init_resource::<PlayerSpawn>()
             .init_resource::<RunNeedsSpawn>()
             .add_systems(Update, restart_run);
