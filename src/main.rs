@@ -3,6 +3,7 @@
 //! settings for 5 seconds before going back to the menu.
 mod config;
 mod game;
+mod game_dialogue;
 mod menu;
 
 use bevy::post_process::bloom::Bloom;
@@ -41,7 +42,12 @@ fn main() {
         .init_state::<GameState>()
         .add_systems(Startup, setup_camera)
         // Adds the plugins for each state
-        .add_plugins((splash::splash_plugin, menu::menu_plugin, game::game_plugin))
+        .add_plugins((
+            splash::splash_plugin,
+            menu::menu_plugin,
+            game::game_plugin,
+            game_dialogue::game_dialogue_plugin,
+        ))
         .run();
 }
 

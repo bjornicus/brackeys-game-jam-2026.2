@@ -221,16 +221,16 @@ Record a defeated enemy when it first enters `Dying`, and record a pickup before
 
 **Goal:** Display and advance arbitrary story or system lines while gameplay is paused.
 
-- [ ] Add an `ActiveDialogue` resource containing owned lines, current line index, and a source/kind (`Terminal` or `Unlock`). Do not store references into an asset that may be replaced.
-- [ ] Add one request/helper that validates non-empty lines, installs `ActiveDialogue`, and transitions from `Game` to `Dialogue`.
-- [ ] On entering `Dialogue`, spawn a modal UI tagged for cleanup on exit: dim translucent backdrop, anchored dialogue panel, speaker label, body text, and a small “Space / Enter / Click” continuation hint.
-- [ ] Render one line at a time using `Speaker::display_label()`; support multi-line and long text with wrapping.
-- [ ] Treat Space, Enter/Numpad Enter, or left mouse `just_pressed` as one advance action even if several occur in the same frame.
-- [ ] For a non-final line, increment once and refresh text. For the final line, clear the active resource and return to `Game`.
-- [ ] Ignore Escape in `Dialogue`; the pause system must not run in this state.
-- [ ] Prevent the click that opened an unlock/terminal modal from also skipping its first line. State transition on the next schedule normally achieves this; add an input guard if tests expose bleed-through.
-- [ ] Ensure no gameplay timers or systems advance while several seconds are spent in dialogue.
-- [ ] Add a development-only test hook or focused unit setup to open a sample conversation; remove any permanent debug key before completing the step.
+- [x] Add an `ActiveDialogue` resource containing owned lines, current line index, and a source/kind (`Terminal` or `Unlock`). Do not store references into an asset that may be replaced.
+- [x] Add one request/helper that validates non-empty lines, installs `ActiveDialogue`, and transitions from `Game` to `Dialogue`.
+- [x] On entering `Dialogue`, spawn a modal UI tagged for cleanup on exit: dim translucent backdrop, anchored dialogue panel, speaker label, body text, and a small “Space / Enter / Click” continuation hint.
+- [x] Render one line at a time using `Speaker::display_label()`; support multi-line and long text with wrapping.
+- [x] Treat Space, Enter/Numpad Enter, or left mouse `just_pressed` as one advance action even if several occur in the same frame.
+- [x] For a non-final line, increment once and refresh text. For the final line, clear the active resource and return to `Game`.
+- [x] Ignore Escape in `Dialogue`; the pause system must not run in this state.
+- [x] Prevent the click that opened an unlock/terminal modal from also skipping its first line. State transition on the next schedule normally achieves this; add an input guard if tests expose bleed-through.
+- [x] Ensure no gameplay timers or systems advance while several seconds are spent in dialogue.
+- [x] Add a development-only test hook or focused unit setup to open a sample conversation; remove any permanent debug key before completing the step.
 
 **Automated acceptance:** Headless tests prove line order, speaker labels, coalesced input, final-line close, Escape ignored, modal cleanup, and frozen representative gameplay timers while in `Dialogue`.
 
@@ -406,3 +406,4 @@ Append one entry per completed step using this format:
 - `Step 0 — 2026-08-29`: Added shared serializable progression skills and a validated, traversal-safe dialogue catalog loader with ordered-line, validation, malformed-RON, label, and filename tests. Added three editable placeholder conversations and documented the RON schema. Files changed: `src/progression.rs`, `src/dialogue.rs`, `src/lib.rs`, `assets/dialogue/story.ron`, `README.md`, `PLAN.MD`. Baseline and final `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed; targeted `cargo test dialogue` passed. Manual story-file readability check not run.
 - `Step 1 — 2026-08-29`: Extended map entities with terminal dialogue IDs, skill/armor pickups, and clone-safe placement helpers; updated gameplay enemy filtering and rebuilt the editor palette, labels, terminal dialogue-ID cycling, and load/save validation. Added initial-map placements and editor/map tests; updated README. Files changed: `src/map.rs`, `src/game.rs`, `src/bin/map_editor.rs`, `assets/maps/initial.ron`, `README.md`, `PLAN.MD`. Baseline/final `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed. Manual editor smoke check not run. Follow-up: runtime terminal/pickup activation is intentionally deferred to Steps 5–6.
 - `Step 2 — 2026-08-29`: Added explicit Dialogue/GameOver/Restarting states, restart intents, RunScoped ownership, restart cleanup/rebuild plumbing, placement/progress/checkpoint data, and New Game routing through Restarting. Terrain/player/enemies/HUD/combat effects are run-scoped; gameplay-only camera shake is gated while camera restoration remains safe outside gameplay. Added headless restart resource/cleanup coverage. Files changed: `src/main.rs`, `src/menu.rs`, `src/game.rs`, `src/tilemap.rs`, `src/progression.rs`, `PLAN.MD`. Baseline/final `cargo fmt --check`, `cargo test`, and `cargo check --all-targets` passed; targeted restart test passed. Manual new-game/pause/combat/camera smoke check not run. Follow-up: terminal/pickup filtering and UI states are intentionally deferred to later steps.
+- `Step 3 — 2026-08-29`: Added owned active-dialogue state, validated request helper, state-scoped modal UI, and one-press dialogue advancement for Space/Enter/Numpad Enter/click. Dialogue renders speaker labels through the shared helper, removes itself on final advance, and is isolated from gameplay schedules. Added headless request/order, coalesced input/final close, Escape, UI cleanup/label, and gameplay-freeze tests. Files changed: `src/game_dialogue.rs`, `src/main.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted `cargo test game_dialogue`, `cargo test`, and `cargo check --all-targets` passed. Manual dialogue smoke check not run. Follow-up: terminals and pickups will request this modal in Steps 5–6.
