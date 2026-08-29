@@ -59,6 +59,7 @@ pub fn game_plugin(app: &mut App) {
             .chain(),
     )
     .add_systems(OnEnter(GameState::Paused), pause_menu_setup)
+    .add_systems(OnEnter(GameState::GameOver), setup_game_over_ui)
     .add_systems(OnEnter(GameState::Restarting), restart_run)
     .add_systems(
         Update,
@@ -102,6 +103,17 @@ pub fn game_plugin(app: &mut App) {
         (tick_player_invulnerability, update_player_health_hud)
             .chain()
             .run_if(in_state(GameState::Game)),
+    )
+    .add_systems(
+        Update,
+        (begin_player_death, tick_player_death)
+            .chain()
+            .after(apply_damage)
+            .run_if(in_state(GameState::Game)),
+    )
+    .add_systems(
+        Update,
+        game_over_action.run_if(in_state(GameState::GameOver)),
     )
     .add_systems(
         Update,
@@ -205,6 +217,18 @@ struct Stunned {
 #[derive(Component, Clone, Debug)]
 struct Dying {
     animation: Handle<Animation>,
+}
+
+/// One-way player death presentation; the timer only advances during gameplay.
+#[derive(Component, Clone, Copy, Debug)]
+struct PlayerDying {
+    remaining: f32,
+}
+
+#[derive(Component)]
+enum GameOverAction {
+    Continue,
+    MainMenu,
 }
 
 #[derive(Component)]
@@ -809,7 +833,15 @@ fn terminal_trigger_overlaps(
 
 fn activate_touched_terminal(
     mut commands: Commands,
-    player: Single<(&Transform, &PlayerCollider), With<Player>>,
+    player: Single<
+        (
+            &Transform,
+            &PlayerCollider,
+            Option<&Health>,
+            Option<&PlayerDying>,
+        ),
+        With<Player>,
+    >,
     mut terminal_queries: ParamSet<(
         Query<(Entity, &Terminal, &Transform), With<TerminalTrigger>>,
         Query<(&mut Terminal, &mut Sprite)>,
@@ -820,7 +852,10 @@ fn activate_touched_terminal(
     combat_config: Res<CombatConfig>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
-    let (player_transform, player_collider) = *player;
+    let (player_transform, player_collider, health, dying) = *player;
+    if dying.is_some() || health.is_some_and(|health| health.current <= 0.0) {
+        return;
+    }
     let player_position = player_transform.translation.xy();
     let selected = terminal_queries
         .p0()
@@ -965,14 +1000,25 @@ fn restored_player_health(config: &CombatConfig, progress: &RunProgress) -> Heal
 
 fn activate_touched_pickup(
     mut commands: Commands,
-    player: Single<(&Transform, &PlayerCollider, &mut Health), With<Player>>,
+    player: Single<
+        (
+            &Transform,
+            &PlayerCollider,
+            &mut Health,
+            Option<&PlayerDying>,
+        ),
+        With<Player>,
+    >,
     pickups: Query<(Entity, &Pickup, &Transform), With<PickupTrigger>>,
     terminals: Query<(&Transform, &Terminal), With<TerminalTrigger>>,
     mut progress: ResMut<RunProgress>,
     config: Res<CombatConfig>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
-    let (transform, collider, mut health) = player.into_inner();
+    let (transform, collider, mut health, dying) = player.into_inner();
+    if dying.is_some() || health.current <= 0.0 {
+        return;
+    }
     // Terminal wins every overlap frame, even before deferred trigger removal applies.
     if terminals.iter().any(|(terminal_transform, _)| {
         terminal_trigger_overlaps(
@@ -1130,7 +1176,15 @@ fn cast_stun(
     combat_config: Res<CombatConfig>,
     progress: Option<Res<RunProgress>>,
     mut shake: ResMut<CameraShakeConfig>,
-    player: Single<(&Transform, Option<&PlayerAction>), With<Player>>,
+    player: Single<
+        (
+            &Transform,
+            Option<&PlayerAction>,
+            Option<&Health>,
+            Option<&PlayerDying>,
+        ),
+        With<Player>,
+    >,
     mut enemies: Query<
         (Entity, &Transform, &Hitbox, Option<&mut EnemyAttack>),
         (With<Enemy>, With<Health>, Without<Dying>),
@@ -1142,6 +1196,8 @@ fn cast_stun(
         .is_none_or(|progress| progress.unlocked_skills.contains(&Skill::Stun))
         || !stun_requested(&keyboard, &mouse)
         || player.1.is_some()
+        || player.2.is_some_and(|health| health.current <= 0.0)
+        || player.3.is_some()
     {
         return;
     }
@@ -1191,7 +1247,7 @@ fn update_enemies(
     game_map: Res<GameMap>,
     animations: Res<EnemyAnimations>,
     combat_config: Option<Res<CombatConfig>>,
-    player: Single<(Entity, &Transform, Option<&Health>), With<Player>>,
+    player: Single<(Entity, &Transform, Option<&Health>, Option<&PlayerDying>), With<Player>>,
     mut damage: Option<ResMut<Messages<Damage>>>,
     mut enemies: Query<
         (
@@ -1209,9 +1265,10 @@ fn update_enemies(
     >,
 ) {
     let occupancy = collision::Occupancy::terrain_only(&game_map.0);
-    let (player_entity, player_transform, player_health) = *player;
+    let (player_entity, player_transform, player_health, player_dying) = *player;
     let player_position = player_transform.translation.xy();
-    let player_is_alive = player_health.is_none_or(|health| health.current > 0.0);
+    let player_is_alive =
+        player_dying.is_none() && player_health.is_none_or(|health| health.current > 0.0);
     let (melee_damage, melee_windup, melee_cooldown) =
         combat_config.map_or((20.0, 0.35, 1.0), |config| {
             (
@@ -2134,6 +2191,8 @@ fn control_character(
         &mut Facing,
         &PlayerCollider,
         Option<&PlayerAction>,
+        Option<&Health>,
+        Option<&PlayerDying>,
     )>,
     game_map: Res<GameMap>,
     my_animations: Res<PlayerAnimations>,
@@ -2144,8 +2203,11 @@ fn control_character(
     mut feedback: ResMut<AttackFeedback>,
     mut teleport: ResMut<TeleportCooldown>,
 ) {
-    let (entity, mut animation, mut transform, mut facing, collider, action) =
+    let (entity, mut animation, mut transform, mut facing, collider, action, health, dying) =
         character.into_inner();
+    if dying.is_some() || health.is_some_and(|health| health.current <= 0.0) {
+        return;
+    }
 
     if action.is_some() {
         if progress
@@ -2262,14 +2324,25 @@ fn control_character(
 }
 
 fn trigger_attack_fire_event(
-    character: Single<(Entity, &SpritesheetAnimation, Option<&mut PlayerAction>), With<Player>>,
+    character: Single<
+        (
+            Entity,
+            &SpritesheetAnimation,
+            Option<&mut PlayerAction>,
+            Option<&Health>,
+            Option<&PlayerDying>,
+        ),
+        With<Player>,
+    >,
     mut attack_fired: MessageWriter<AttackFired>,
 ) {
-    let (entity, sprite_animation, action) = character.into_inner();
+    let (entity, sprite_animation, action, health, dying) = character.into_inner();
+    if dying.is_some() || health.is_some_and(|health| health.current <= 0.0) {
+        return;
+    }
     let Some(mut action) = action else {
         return;
     };
-
     if !action.fired
         && sprite_animation.animation == action.animation
         && sprite_animation.progress.frame >= PLAYER_SHOOT_FIRE_FRAME
@@ -2287,13 +2360,18 @@ fn handle_lightning_attacks(
     combat_config: Res<CombatConfig>,
     mut attack_fired: MessageReader<AttackFired>,
     mut damage: MessageWriter<Damage>,
+    players: Query<(&Health, Option<&PlayerDying>), With<Player>>,
     hitboxes: Query<(Entity, &Transform, &Hitbox), With<Health>>,
 ) {
     for fired in attack_fired.read() {
-        if fired.request.kind != AttackKind::Lightning {
+        if fired.request.kind != AttackKind::Lightning
+            || !matches!(
+                players.get(fired.entity),
+                Ok((health, None)) if health.current > 0.0
+            )
+        {
             continue;
         }
-
         commands.spawn((
             RunScoped,
             LightningVisual {
@@ -2303,7 +2381,6 @@ fn handle_lightning_attacks(
             },
             Transform::default(),
         ));
-
         if let Some(target) = nearest_segment_hit(
             fired.request.origin,
             fired.request.target,
@@ -2324,12 +2401,17 @@ fn spawn_projectiles(
     mut commands: Commands,
     combat_config: Res<CombatConfig>,
     mut attack_fired: MessageReader<AttackFired>,
+    players: Query<(&Health, Option<&PlayerDying>), With<Player>>,
 ) {
     for fired in attack_fired.read() {
-        if fired.request.kind != AttackKind::Projectile {
+        if fired.request.kind != AttackKind::Projectile
+            || !matches!(
+                players.get(fired.entity),
+                Ok((health, None)) if health.current > 0.0
+            )
+        {
             continue;
         }
-
         commands.spawn((
             RunScoped,
             Projectile {
@@ -2492,6 +2574,129 @@ fn tick_player_invulnerability(
             }
         } else if let Some(mut sprite) = sprite {
             sprite.color = Color::srgb(1.0, 0.45, 0.45);
+        }
+    }
+}
+
+fn begin_player_death(
+    mut commands: Commands,
+    config: Res<CombatConfig>,
+    mut players: Query<
+        (Entity, &Health, Option<&mut Sprite>),
+        (With<Player>, Without<PlayerDying>),
+    >,
+    mut feedback: ResMut<AttackFeedback>,
+    mut teleport: ResMut<TeleportCooldown>,
+    mut shake: ResMut<CameraShakeConfig>,
+    mut attack_fired: ResMut<Messages<AttackFired>>,
+    mut damage: ResMut<Messages<Damage>>,
+) {
+    for (entity, health, sprite) in &mut players {
+        if health.current > 0.0 {
+            continue;
+        }
+        commands.entity(entity).insert(PlayerDying {
+            remaining: config.player_death_presentation_duration,
+        });
+        commands
+            .entity(entity)
+            .remove::<(PlayerAction, Hitbox, Invulnerable)>();
+        if let Some(mut sprite) = sprite {
+            sprite.color = Color::srgb(0.35, 0.08, 0.08);
+        }
+        *feedback = AttackFeedback::default();
+        *teleport = TeleportCooldown::default();
+        attack_fired.clear();
+        damage.clear();
+        shake.trauma = 0.0;
+    }
+}
+
+fn tick_player_death(
+    time: Res<Time>,
+    mut players: Query<&mut PlayerDying, With<Player>>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    for mut dying in &mut players {
+        dying.remaining -= time.delta_secs();
+        if dying.remaining <= 0.0 {
+            next_state.set(GameState::GameOver);
+        }
+    }
+}
+
+fn setup_game_over_ui(mut commands: Commands) {
+    commands.spawn((
+        DespawnOnExit(GameState::GameOver),
+        Node {
+            width: percent(100),
+            height: percent(100),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            flex_direction: FlexDirection::Column,
+            row_gap: px(16),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.72)),
+        children![
+            (
+                Text::new("Game Over"),
+                TextFont {
+                    font_size: FontSize::Px(56.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE)
+            ),
+            (
+                Button,
+                GameOverAction::Continue,
+                Node {
+                    padding: UiRect::all(px(14)),
+                    ..default()
+                },
+                BackgroundColor(PAUSE_BUTTON_NORMAL),
+                children![(
+                    Text::new("Continue from Last Checkpoint"),
+                    TextFont {
+                        font_size: FontSize::Px(24.0),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE)
+                )]
+            ),
+            (
+                Button,
+                GameOverAction::MainMenu,
+                Node {
+                    padding: UiRect::all(px(14)),
+                    ..default()
+                },
+                BackgroundColor(PAUSE_BUTTON_NORMAL),
+                children![(
+                    Text::new("Main Menu"),
+                    TextFont {
+                        font_size: FontSize::Px(24.0),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE)
+                )]
+            ),
+        ],
+    ));
+}
+
+fn game_over_action(
+    buttons: Query<(&Interaction, &GameOverAction), (Changed<Interaction>, With<Button>)>,
+    mut restart: ResMut<RestartRequest>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    for (interaction, action) in &buttons {
+        if *interaction == Interaction::Pressed {
+            restart.0 = match action {
+                GameOverAction::Continue => RestartIntent::ContinueCheckpoint,
+                GameOverAction::MainMenu => RestartIntent::MainMenu,
+            };
+            next_state.set(GameState::Restarting);
         }
     }
 }
@@ -2934,7 +3139,16 @@ mod tests {
                     .chain(),
             );
 
-        let player = app.world_mut().spawn_empty().id();
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+            ))
+            .id();
         let target = app
             .world_mut()
             .spawn((
@@ -3004,7 +3218,17 @@ mod tests {
                 )
                     .chain(),
             );
-        let player = app.world_mut().spawn((Faction::Player,)).id();
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                Faction::Player,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+            ))
+            .id();
         let enemy = app
             .world_mut()
             .spawn((
@@ -3082,7 +3306,16 @@ mod tests {
             .insert_resource(CombatConfig::default())
             .add_systems(Update, spawn_projectiles);
 
-        let player = app.world_mut().spawn_empty().id();
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+            ))
+            .id();
         for target in [Vec2::new(10.0, 0.0), Vec2::new(1000.0, 0.0)] {
             app.world_mut()
                 .resource_mut::<Messages<AttackFired>>()
@@ -3909,6 +4142,73 @@ mod tests {
         assert_eq!(
             *app.world().entity(camera).get::<Transform>().unwrap(),
             normal
+        );
+    }
+
+    #[test]
+    fn player_death_is_one_way_disables_hitbox_and_waits_for_presentation() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .init_resource::<CombatConfig>()
+            .init_resource::<AttackFeedback>()
+            .init_resource::<TeleportCooldown>()
+            .init_resource::<CameraShakeConfig>()
+            .add_message::<AttackFired>()
+            .add_message::<Damage>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.4),
+            ))
+            .add_systems(
+                Update,
+                (begin_player_death, tick_player_death)
+                    .chain()
+                    .run_if(in_state(GameState::Game)),
+            );
+        app.world_mut()
+            .resource_mut::<NextState<GameState>>()
+            .set(GameState::Game);
+        app.update();
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                Health {
+                    current: 0.0,
+                    max: 100.0,
+                },
+                Hitbox(Collider::new(Vec2::ONE, Vec2::ZERO)),
+            ))
+            .id();
+        app.update();
+        assert!(app.world().entity(player).contains::<PlayerDying>());
+        assert!(!app.world().entity(player).contains::<Hitbox>());
+        // The first 0.4 s frame starts the presentation; it does not skip to GameOver.
+        assert_eq!(
+            app.world().resource::<State<GameState>>().get(),
+            &GameState::Game
+        );
+        app.update();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<State<GameState>>().get(),
+            &GameState::GameOver
+        );
+        let remaining = app
+            .world()
+            .entity(player)
+            .get::<PlayerDying>()
+            .unwrap()
+            .remaining;
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(player)
+                .get::<PlayerDying>()
+                .unwrap()
+                .remaining,
+            remaining
         );
     }
 
