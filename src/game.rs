@@ -14,7 +14,10 @@ const PAUSE_BUTTON_NORMAL: Color = Color::srgb(0.18, 0.25, 0.38);
 const PAUSE_BUTTON_HOVERED: Color = Color::srgb(0.25, 0.42, 0.65);
 const PAUSE_BUTTON_PRESSED: Color = Color::srgb(0.12, 0.65, 0.35);
 
-use crate::GameState;
+use crate::{
+    GameState,
+    config::{CameraShakeConfig, CombatConfig},
+};
 
 // This plugin contains the game.
 pub fn game_plugin(app: &mut App) {
@@ -179,45 +182,6 @@ struct CollisionDebug {
     enabled: bool,
 }
 
-#[derive(Resource, Clone, Copy, Debug)]
-struct CombatConfig {
-    lightning_range: f32,
-    lightning_damage: f32,
-    lightning_visible_lifetime: f32,
-    projectile_speed: f32,
-    projectile_damage: f32,
-    projectile_collision_radius: f32,
-    projectile_maximum_lifetime: f32,
-    enemy_maximum_health: f32,
-    enemy_speed: f32,
-    enemy_attack_distance: f32,
-    teleport_cooldown: f32,
-    shockwave_radius: f32,
-    shockwave_animation_duration: f32,
-    stun_duration: f32,
-}
-
-impl Default for CombatConfig {
-    fn default() -> Self {
-        Self {
-            lightning_range: 220.0,
-            lightning_damage: 40.0,
-            lightning_visible_lifetime: 0.18,
-            projectile_speed: 500.0,
-            projectile_damage: 30.0,
-            projectile_collision_radius: 6.0,
-            projectile_maximum_lifetime: 3.0,
-            enemy_maximum_health: 100.0,
-            enemy_speed: 55.0,
-            enemy_attack_distance: 64.0,
-            teleport_cooldown: 5.0,
-            shockwave_radius: 120.0,
-            shockwave_animation_duration: 0.4,
-            stun_duration: 2.0,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AttackMode {
     Lightning,
@@ -317,31 +281,6 @@ struct ShockwaveVisual {
     elapsed: f32,
     duration: f32,
     radius: f32,
-}
-
-#[derive(Resource, Clone, Copy, Debug)]
-struct CameraShakeConfig {
-    trauma: f32,
-    trauma_per_stun: f32,
-    trauma_decay_per_second: f32,
-    exponent: f32,
-    max_rotation: f32,
-    max_translation: f32,
-    noise_speed: f32,
-}
-
-impl Default for CameraShakeConfig {
-    fn default() -> Self {
-        Self {
-            trauma: 0.0,
-            trauma_per_stun: 0.45,
-            trauma_decay_per_second: 1.2,
-            exponent: 2.0,
-            max_rotation: 0.08,
-            max_translation: 12.0,
-            noise_speed: 20.0,
-        }
-    }
 }
 
 #[derive(Component, Clone, Copy, Debug)]
