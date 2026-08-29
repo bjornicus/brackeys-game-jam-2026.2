@@ -29,6 +29,26 @@ Run `cargo run --bin map_editor -- <map-name>`. Palette keys are `1` floor, `2` 
 
 Maps are sparse RON files under `assets/maps/`. Enemy placements are independent of terrain; removing or painting terrain does not silently remove an entity.
 
+## Story dialogue
+
+Story conversations live in the human-editable RON catalog at
+`assets/dialogue/story.ron`. Each ID maps to an ordered list of lines; a line
+has a `speaker` (`NoFive`, `NoOne`, `NoTwo`, or `System`) and a `text` string:
+
+```ron
+(
+    conversations: {
+        "terminal_intro": [
+            (speaker: NoOne, text: "No. Five, can you hear me?"),
+            (speaker: NoFive, text: "Loud and clear."),
+        ],
+    },
+)
+```
+
+Conversation IDs and conversations must be non-empty. Keep IDs unique; the
+runtime and map editor use them to connect terminals to dialogue.
+
 ## Assets and tuning
 
 Temporary checked-in sheets and their stable replacement layout are documented in [`assets/sprites/PLACEHOLDERS.md`](assets/sprites/PLACEHOLDERS.md). Regenerate them with `python3 tools/generate_placeholder_sprites.py`.

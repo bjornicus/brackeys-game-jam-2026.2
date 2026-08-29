@@ -1,0 +1,18 @@
+// Terminal conversations. Each ID maps to ordered `(speaker, text)` lines.
+(
+    conversations: {
+        "terminal_intro": [
+            (speaker: NoOne, text: "No. Five, can you hear me?"),
+            (speaker: NoFive, text: "Loud and clear. I am moving deeper into the station."),
+        ],
+        "terminal_signal": [
+            (speaker: NoTwo, text: "No. Five, the signal is getting stronger ahead."),
+            (speaker: NoFive, text: "Then I will follow it. Keep the channel open."),
+        ],
+        "terminal_crossroads": [
+            (speaker: NoOne, text: "No. Five, do not trust the lights at the crossroads."),
+            (speaker: NoTwo, text: "I agree. They are drawing power from somewhere else."),
+            (speaker: NoFive, text: "Understood. I will find another way through."),
+        ],
+    },
+)
