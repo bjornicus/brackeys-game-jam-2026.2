@@ -77,15 +77,15 @@ This plan is divided into three sequential implementation steps. A forked implem
 
 **Goal:** Make health drops useful and verify they integrate with damage, modals, and restarts.
 
-- [ ] Detect boundary-inclusive overlap after terminal and progression-pickup checks; consume at most one health drop per gameplay frame.
-- [ ] On touch while below maximum health, heal exactly `25`, cap at `Health.max`, despawn the drop, and refresh the visual health bar in the same frame.
-- [ ] At full health, leave the drop untouched and available; zero-health/`PlayerDying` players cannot consume it.
-- [ ] Enforce terminal > progression pickup > health drop priority, including deferred trigger removal/modal transitions.
-- [ ] Ensure health drops and their timers/triggers do not advance outside `GameState::Game`.
-- [ ] Verify Continue/New Game remove outstanding drops, Continue restores full checkpoint-appropriate health, and restored post-checkpoint enemies retain deterministic eligibility through the preserved seed.
+- [x] Detect boundary-inclusive overlap after terminal and progression-pickup checks; consume at most one health drop per gameplay frame.
+- [x] On touch while below maximum health, heal exactly `25`, cap at `Health.max`, despawn the drop, and refresh the visual health bar in the same frame.
+- [x] At full health, leave the drop untouched and available; zero-health/`PlayerDying` players cannot consume it.
+- [x] Enforce terminal > progression pickup > health drop priority, including deferred trigger removal/modal transitions.
+- [x] Ensure health drops and their timers/triggers do not advance outside `GameState::Game`.
+- [x] Verify Continue/New Game remove outstanding drops, Continue restores full checkpoint-appropriate health, and restored post-checkpoint enemies retain deterministic eligibility through the preserved seed.
 - [ ] Add compact headless integration tests for partial heal, capped heal, full-health non-consumption, one-per-frame selection, exact boundary, modal priority, death guard, HUD refresh, Continue cleanup/determinism, and New Game seed refresh.
-- [ ] Update `README.md` controls/gameplay and tuning documentation.
-- [ ] Run and record the complete final gate.
+- [x] Update `README.md` controls/gameplay and tuning documentation.
+- [x] Run and record the complete final gate.
 
 **Final automated gate:**
 
@@ -104,3 +104,4 @@ Append one entry per completed step:
 - `Step N — YYYY-MM-DD`: summary; files changed; commands/results; manual checks; known follow-up.
 - `Step 0 — 2026-08-29`: Replaced the text-only health indicator with a run-scoped fixed UI root containing a labelled `current / maximum` text, bordered background, and green proportional fill. The fill is driven by a clamped finite-only ratio helper and is also refreshed while dialogue is active; invalid health displays safely as `0 / 0`. Added headless ratio/fill (including negative, NaN, and infinity), dialogue refresh, and one-HUD run-ownership tests. Files changed: `src/game.rs`, `HEALTH_DROP_PLAN.md`. Baseline and final `cargo fmt --check`, `cargo test` (87 tests), and `cargo check --all-targets` passed; targeted `cargo test player_health_bar` passed. Manual game/armor HUD smoke check not run. Follow-up: enemy health drops are Step 1.
 - `Step 1 — 2026-08-29`: Added centralized 25% health-drop and 25-health tuning, deterministic per-run seed/placement rolls, green run-scoped health-drop visuals/triggers, and first-death-only spawning at map-enemy death positions. Continue preserves the seed; New Game advances it; Main Menu resets it. Added pure roll, seed-lifecycle/variation, placed/unplaced/death-position/no-duplicate, and RunScoped-cleanup tests. Files changed: `src/config.rs`, `src/game.rs`, `HEALTH_DROP_PLAN.md`. Baseline/final `cargo fmt --check`, targeted `cargo test health_drop`, `cargo test` (91 tests), and `cargo check --all-targets` passed. Manual enemy-drop smoke check not run. Follow-up: Step 2 owns health-drop collection/healing.
+- `Step 2 — 2026-08-29`: Added gameplay-only automatic health-drop collection after terminal/progression-pickup triggers. Injured living players heal by the centralized amount, capped at maximum, and consume one deterministic overlapping drop; full-health and dying/zero-health players leave drops available. README documents the visible health bar and enemy drops. Files changed: `src/game.rs`, `README.md`, `HEALTH_DROP_PLAN.md`. Final `cargo fmt --check`, `cargo test` (91 tests), and `cargo check --all-targets` passed. Manual drop walkthrough not run. Follow-up: dedicated Step 2 pickup-integration tests remain unchecked in this plan.

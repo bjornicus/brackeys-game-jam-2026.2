@@ -26,7 +26,7 @@ Locked controls are omitted from the HUD and silently do nothing. In gameplay, s
 
 ## Health, death, and checkpoints
 
-A new run starts at **100 / 100** health with lightning selected. Enemy melee attacks wind up before hitting; an accepted hit grants brief invulnerability. At zero health, no. five has a short death presentation, followed by **Game Over**.
+A new run starts at **100 / 100** health with lightning selected. The fixed health bar and text show current health at all times. Enemy melee attacks wind up before hitting; an accepted hit grants brief invulnerability. Defeated map enemies have a 25% chance to leave a green health drop. Touch one while injured to restore 25 health (up to maximum); drops stay available at full health. At zero health, no. five has a short death presentation, followed by **Game Over**.
 
 Every terminal is an immediate checkpoint before its dialogue opens. **Continue from Last Checkpoint** rebuilds the original map at that terminal with full checkpoint-appropriate health: progress made before it (activated terminals, pickups/unlocks/armor, and defeated enemies) remains, while progress made after it is rolled back. Before a terminal, Continue uses the initial spawn/default state. **Main Menu**, followed by **New Game**, discards all in-memory checkpoint/run progress.
 

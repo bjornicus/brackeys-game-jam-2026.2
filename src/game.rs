@@ -90,11 +90,11 @@ pub fn game_plugin(app: &mut App) {
             .chain()
             .run_if(in_state(GameState::Game)),
     )
-    // World triggers are ordered so a terminal wins an overlap, then a pickup can refresh both
-    // HUDs before its dialogue transition freezes gameplay on the next frame.
+    // World triggers are ordered terminal, progression pickup, then health drop.
     .add_systems(
         Update,
-        activate_touched_pickup
+        (activate_touched_pickup, activate_touched_health_drop)
+            .chain()
             .after(activate_touched_terminal)
             .before(update_attack_hud)
             .before(update_player_health_hud)
@@ -1056,6 +1056,52 @@ fn restored_player_health(config: &CombatConfig, progress: &RunProgress) -> Heal
         current: maximum,
         max: maximum,
     }
+}
+
+/// Health drops are checked after progression pickups and never open a modal.
+fn activate_touched_health_drop(
+    mut commands: Commands,
+    player: Single<
+        (
+            &Transform,
+            &PlayerCollider,
+            &mut Health,
+            Option<&PlayerDying>,
+        ),
+        With<Player>,
+    >,
+    drops: Query<(Entity, &Transform), With<HealthDropTrigger>>,
+    terminals: Query<(&Transform, &Terminal), With<TerminalTrigger>>,
+    pickups: Query<(&Transform, &Pickup), With<PickupTrigger>>,
+    config: Res<CombatConfig>,
+) {
+    let (transform, collider, mut health, dying) = player.into_inner();
+    if dying.is_some() || health.current <= 0.0 || health.current >= health.max {
+        return;
+    }
+    let overlaps = |position: Vec2, size: Vec2| {
+        terminal_trigger_overlaps(transform.translation.xy(), collider.0, position, size)
+    };
+    if terminals
+        .iter()
+        .any(|(terminal, _)| overlaps(terminal.translation.xy(), config.terminal_trigger_size))
+        || pickups
+            .iter()
+            .any(|(pickup, _)| overlaps(pickup.translation.xy(), config.pickup_trigger_size))
+    {
+        return;
+    }
+    let Some((entity, _)) = drops
+        .iter()
+        .filter(|(_, drop_transform)| {
+            overlaps(drop_transform.translation.xy(), config.pickup_trigger_size)
+        })
+        .min_by_key(|(entity, _)| entity.index())
+    else {
+        return;
+    };
+    health.current = (health.current + config.health_drop_healing).min(health.max);
+    commands.entity(entity).despawn();
 }
 
 fn activate_touched_pickup(
