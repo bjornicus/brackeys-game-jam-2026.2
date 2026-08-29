@@ -106,7 +106,7 @@ pub fn game_plugin(app: &mut App) {
     .add_systems(
         Update,
         (
-            cast_stun.before(control_character),
+            cast_stun.before(control_character).before(update_enemies),
             tick_shockwaves.after(cast_stun),
             draw_shockwaves,
         )
@@ -122,6 +122,7 @@ pub fn game_plugin(app: &mut App) {
             spawn_enemy_health_bars,
             tick_stunned_enemies,
             update_enemies,
+            draw_enemy_attack_telegraphs,
             begin_enemy_deaths,
             finish_enemy_deaths,
             update_enemy_health_bars,
@@ -185,6 +186,14 @@ struct EnemyCollider(Collider);
 struct EnemyMovement {
     speed: f32,
     attack_distance: f32,
+}
+
+/// The mutually exclusive melee state for a living enemy.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+enum EnemyAttack {
+    Ready,
+    WindingUp { remaining: f32 },
+    Cooldown { remaining: f32 },
 }
 
 /// Stun refreshes to the full duration when it is applied again.
@@ -1013,6 +1022,7 @@ fn spawn_enemies_from_map(
     game_map: Option<Res<GameMap>>,
     animations: Option<Res<EnemyAnimations>>,
     combat_config: Res<CombatConfig>,
+    progress: Option<Res<RunProgress>>,
     mut spawned: ResMut<EnemiesSpawned>,
 ) {
     if spawned.0 {
@@ -1026,12 +1036,19 @@ fn spawn_enemies_from_map(
         if !matches!(placement.kind, map::MapEntityKind::Enemy) {
             continue;
         }
+        let placement_id = PlacementId {
+            x: placement.x,
+            y: placement.y,
+        };
+        if progress
+            .as_ref()
+            .is_some_and(|progress| progress.defeated_enemies.contains(&placement_id))
+        {
+            continue;
+        }
         commands.spawn((
             RunScoped,
-            Placement(PlacementId {
-                x: placement.x,
-                y: placement.y,
-            }),
+            Placement(placement_id),
             Enemy,
             Faction::Enemy,
             Facing::Down,
@@ -1045,6 +1062,7 @@ fn spawn_enemies_from_map(
                 speed: combat_config.enemy_speed,
                 attack_distance: combat_config.enemy_attack_distance,
             },
+            EnemyAttack::Ready,
             SpritesheetAnimation::new(animations.idle.clone()),
             Transform::from_translation(enemy_spawn_position(placement).extend(2.0)),
         ));
@@ -1113,7 +1131,10 @@ fn cast_stun(
     progress: Option<Res<RunProgress>>,
     mut shake: ResMut<CameraShakeConfig>,
     player: Single<(&Transform, Option<&PlayerAction>), With<Player>>,
-    enemies: Query<(Entity, &Transform, &Hitbox), (With<Enemy>, With<Health>, Without<Dying>)>,
+    mut enemies: Query<
+        (Entity, &Transform, &Hitbox, Option<&mut EnemyAttack>),
+        (With<Enemy>, With<Health>, Without<Dying>),
+    >,
 ) {
     // Firing accepts no gameplay input other than pause (handled separately).
     if !progress
@@ -1126,12 +1147,15 @@ fn cast_stun(
     }
 
     let origin = player.0.translation.xy();
-    for (enemy, transform, hitbox) in &enemies {
+    for (enemy, transform, hitbox, attack) in &mut enemies {
         if collision::circle_intersects_aabb(
             origin,
             combat_config.shockwave_radius,
             hitbox.0.aabb_at(transform.translation.xy()),
         ) {
+            if let Some(mut attack) = attack {
+                *attack = EnemyAttack::Ready;
+            }
             commands
                 .entity(enemy)
                 .insert(refreshed_stun(combat_config.stun_duration));
@@ -1166,7 +1190,9 @@ fn update_enemies(
     time: Res<Time>,
     game_map: Res<GameMap>,
     animations: Res<EnemyAnimations>,
-    player: Single<&Transform, With<Player>>,
+    combat_config: Option<Res<CombatConfig>>,
+    player: Single<(Entity, &Transform, Option<&Health>), With<Player>>,
+    mut damage: Option<ResMut<Messages<Damage>>>,
     mut enemies: Query<
         (
             &mut Transform,
@@ -1175,46 +1201,212 @@ fn update_enemies(
             Option<&EnemyMovement>,
             Option<&Stunned>,
             Option<&Dying>,
+            Option<&mut EnemyAttack>,
             &mut SpritesheetAnimation,
+            Option<&mut Sprite>,
         ),
         (With<Enemy>, Without<Player>),
     >,
 ) {
     let occupancy = collision::Occupancy::terrain_only(&game_map.0);
-    let player_position = player.translation.xy();
-    for (mut transform, mut facing, collider, movement, stunned, dying, mut animation) in
-        &mut enemies
+    let (player_entity, player_transform, player_health) = *player;
+    let player_position = player_transform.translation.xy();
+    let player_is_alive = player_health.is_none_or(|health| health.current > 0.0);
+    let (melee_damage, melee_windup, melee_cooldown) =
+        combat_config.map_or((20.0, 0.35, 1.0), |config| {
+            (
+                config.enemy_melee_damage,
+                config.enemy_melee_windup,
+                config.enemy_melee_cooldown,
+            )
+        });
+    for (
+        mut transform,
+        mut facing,
+        collider,
+        movement,
+        stunned,
+        dying,
+        attack,
+        mut animation,
+        sprite,
+    ) in &mut enemies
     {
         if let Some(dying) = dying {
             if animation.animation != dying.animation {
                 animation.switch(dying.animation.clone());
             }
+            if let Some(mut sprite) = sprite {
+                sprite.color = Color::WHITE;
+            }
             continue;
         }
         if stunned.is_some_and(|stunned| stunned.remaining > 0.0) {
+            if let Some(mut attack) = attack {
+                *attack = EnemyAttack::Ready;
+            }
             if animation.animation != animations.stunned {
                 animation.switch(animations.stunned.clone());
+            }
+            if let Some(mut sprite) = sprite {
+                sprite.color = Color::WHITE;
             }
             continue;
         }
         let Some(movement) = movement else { continue };
-        let direction = player_position - transform.translation.xy();
-        let next_position = enemy_chase_position(
-            transform.translation.xy(),
-            player_position,
-            *movement,
-            collider.0,
-            time.delta_secs(),
-            &occupancy,
-        );
-        if next_position != transform.translation.xy() {
-            *facing = facing_from_direction(direction, *facing);
-            if animation.animation != animations.movement {
-                animation.switch(animations.movement.clone());
+        let Some(mut attack) = attack else {
+            let position = transform.translation.xy();
+            move_enemy_toward_player(
+                &mut transform,
+                &mut facing,
+                &mut animation,
+                &animations,
+                position,
+                player_position,
+                *movement,
+                collider.0,
+                time.delta_secs(),
+                &occupancy,
+            );
+            continue;
+        };
+        let position = transform.translation.xy();
+        let distance = position.distance(player_position);
+        if !player_is_alive {
+            *attack = EnemyAttack::Ready;
+            if animation.animation != animations.idle {
+                animation.switch(animations.idle.clone());
             }
-            transform.translation = next_position.extend(transform.translation.z);
-        } else if animation.animation != animations.idle {
-            animation.switch(animations.idle.clone());
+            if let Some(mut sprite) = sprite {
+                sprite.color = Color::WHITE;
+            }
+            continue;
+        }
+
+        let winding = matches!(*attack, EnemyAttack::WindingUp { .. });
+        if let Some(mut sprite) = sprite {
+            sprite.color = if winding {
+                Color::srgb(1.0, 0.35, 0.35)
+            } else {
+                Color::WHITE
+            };
+        }
+        match *attack {
+            EnemyAttack::Ready if distance <= movement.attack_distance => {
+                *attack = EnemyAttack::WindingUp {
+                    remaining: melee_windup,
+                };
+                if animation.animation != animations.idle {
+                    animation.switch(animations.idle.clone());
+                }
+            }
+            EnemyAttack::Ready => move_enemy_toward_player(
+                &mut transform,
+                &mut facing,
+                &mut animation,
+                &animations,
+                position,
+                player_position,
+                *movement,
+                collider.0,
+                time.delta_secs(),
+                &occupancy,
+            ),
+            EnemyAttack::WindingUp { remaining } => {
+                let remaining = remaining - time.delta_secs();
+                if remaining > 0.0 {
+                    *attack = EnemyAttack::WindingUp { remaining };
+                } else {
+                    // The target is checked at impact, so retreating during wind-up is a miss.
+                    if position.distance(player_position) <= movement.attack_distance {
+                        if let Some(damage) = &mut damage {
+                            damage.write(Damage {
+                                target: player_entity,
+                                amount: melee_damage,
+                            });
+                        }
+                    }
+                    *attack = EnemyAttack::Cooldown {
+                        remaining: melee_cooldown,
+                    };
+                }
+            }
+            EnemyAttack::Cooldown { remaining } => {
+                let remaining = remaining - time.delta_secs();
+                *attack = if remaining <= 0.0 {
+                    EnemyAttack::Ready
+                } else {
+                    EnemyAttack::Cooldown { remaining }
+                };
+                if distance > movement.attack_distance {
+                    move_enemy_toward_player(
+                        &mut transform,
+                        &mut facing,
+                        &mut animation,
+                        &animations,
+                        position,
+                        player_position,
+                        *movement,
+                        collider.0,
+                        time.delta_secs(),
+                        &occupancy,
+                    );
+                } else if animation.animation != animations.idle {
+                    animation.switch(animations.idle.clone());
+                }
+            }
+        }
+    }
+}
+
+fn move_enemy_toward_player(
+    transform: &mut Transform,
+    facing: &mut Facing,
+    animation: &mut SpritesheetAnimation,
+    animations: &EnemyAnimations,
+    position: Vec2,
+    player_position: Vec2,
+    movement: EnemyMovement,
+    collider: Collider,
+    delta_secs: f32,
+    occupancy: &collision::Occupancy<'_>,
+) {
+    let direction = player_position - position;
+    let next_position = enemy_chase_position(
+        position,
+        player_position,
+        movement,
+        collider,
+        delta_secs,
+        occupancy,
+    );
+    if next_position != position {
+        *facing = facing_from_direction(direction, *facing);
+        if animation.animation != animations.movement {
+            animation.switch(animations.movement.clone());
+        }
+        transform.translation = next_position.extend(transform.translation.z);
+    } else if animation.animation != animations.idle {
+        animation.switch(animations.idle.clone());
+    }
+}
+
+fn draw_enemy_attack_telegraphs(
+    combat_config: Res<CombatConfig>,
+    enemies: Query<
+        (&Transform, &EnemyMovement, &EnemyAttack),
+        (With<Enemy>, Without<Dying>, Without<Stunned>),
+    >,
+    mut gizmos: Gizmos,
+) {
+    for (transform, movement, attack) in &enemies {
+        if let EnemyAttack::WindingUp { remaining } = attack {
+            let ratio = (*remaining / combat_config.enemy_melee_windup).clamp(0.0, 1.0);
+            gizmos.circle_2d(
+                transform.translation.xy(),
+                movement.attack_distance * ratio.max(0.12),
+                Color::srgb(1.0, 0.12, 0.12),
+            );
         }
     }
 }
@@ -1273,10 +1465,17 @@ fn health_bar_ratio(health: Health) -> f32 {
 fn begin_enemy_deaths(
     mut commands: Commands,
     animations: Res<EnemyAnimations>,
-    enemies: Query<(Entity, &Health, Option<&Children>), (With<Enemy>, Without<Dying>)>,
+    mut progress: Option<ResMut<RunProgress>>,
+    enemies: Query<
+        (Entity, &Health, Option<&Children>, Option<&Placement>),
+        (With<Enemy>, Without<Dying>),
+    >,
 ) {
-    for (enemy, health, children) in &enemies {
+    for (enemy, health, children, placement) in &enemies {
         if health.current <= 0.0 {
+            if let (Some(progress), Some(placement)) = (&mut progress, placement) {
+                progress.defeated_enemies.insert(placement.0);
+            }
             if let Some(children) = children {
                 for child in children.iter() {
                     commands.entity(child).insert(Visibility::Hidden);
@@ -1287,7 +1486,7 @@ fn begin_enemy_deaths(
             });
             commands
                 .entity(enemy)
-                .remove::<(EnemyMovement, Hitbox, Health, Stunned)>();
+                .remove::<(EnemyMovement, EnemyAttack, Hitbox, Health, Stunned)>();
         }
     }
 }
@@ -3285,6 +3484,202 @@ mod tests {
                 .translation
                 .x
                 > 0.0
+        );
+    }
+
+    fn melee_test_app(player_position: Vec2) -> (App, Entity, Entity) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(GameMap(floor_rect(-2..=5, -2..=2)))
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
+            })
+            .insert_resource(CombatConfig::default())
+            .add_message::<Damage>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(0.1),
+            ))
+            .add_systems(Update, (update_enemies, apply_damage).chain());
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                Health {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                Transform::from_translation(player_position.extend(2.0)),
+            ))
+            .id();
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Facing::Right,
+                EnemyCollider(Collider::new(ENEMY_COLLIDER_SIZE, ENEMY_COLLIDER_OFFSET)),
+                EnemyMovement {
+                    speed: 55.0,
+                    attack_distance: 64.0,
+                },
+                EnemyAttack::Ready,
+                SpritesheetAnimation::new(Handle::default()),
+                Transform::default(),
+            ))
+            .id();
+        (app, player, enemy)
+    }
+
+    #[test]
+    fn enemy_melee_winds_up_hits_once_and_enforces_cooldown() {
+        let (mut app, player, enemy) = melee_test_app(Vec2::new(64.0, 0.0));
+        app.update();
+        assert!(matches!(
+            app.world().entity(enemy).get::<EnemyAttack>(),
+            Some(EnemyAttack::WindingUp { .. })
+        ));
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            80.0
+        );
+        assert!(matches!(
+            app.world().entity(enemy).get::<EnemyAttack>(),
+            Some(EnemyAttack::Cooldown { .. })
+        ));
+        for _ in 0..5 {
+            app.update();
+        }
+        // The cooldown is longer than this interval, and invulnerability also blocks repeats.
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            80.0
+        );
+    }
+
+    #[test]
+    fn enemies_do_not_start_melee_against_a_zero_health_player() {
+        let (mut app, player, enemy) = melee_test_app(Vec2::new(64.0, 0.0));
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<Health>()
+            .unwrap()
+            .current = 0.0;
+        app.update();
+        assert!(matches!(
+            app.world().entity(enemy).get::<EnemyAttack>(),
+            Some(EnemyAttack::Ready)
+        ));
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            0.0
+        );
+    }
+
+    #[test]
+    fn enemy_melee_misses_after_retreat_and_stun_cancels_windup() {
+        let (mut app, player, enemy) = melee_test_app(Vec2::new(64.0, 0.0));
+        app.update();
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation
+            .x = 200.0;
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            100.0
+        );
+        assert!(matches!(
+            app.world().entity(enemy).get::<EnemyAttack>(),
+            Some(EnemyAttack::Cooldown { .. })
+        ));
+
+        let (mut app, player, enemy) = melee_test_app(Vec2::new(64.0, 0.0));
+        app.update();
+        app.world_mut()
+            .entity_mut(enemy)
+            .insert(Stunned { remaining: 1.0 });
+        app.update();
+        assert!(matches!(
+            app.world().entity(enemy).get::<EnemyAttack>(),
+            Some(EnemyAttack::Ready)
+        ));
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            100.0
+        );
+    }
+
+    #[test]
+    fn enemy_death_records_placement_and_rebuild_filter_omits_it() {
+        let id = PlacementId { x: 1, y: 0 };
+        let mut death_app = App::new();
+        death_app
+            .add_plugins(MinimalPlugins)
+            .insert_resource(RunProgress::default())
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
+            })
+            .add_systems(Update, begin_enemy_deaths);
+        let dying_enemy = death_app
+            .world_mut()
+            .spawn((
+                Enemy,
+                Placement(id),
+                Health {
+                    current: 0.0,
+                    max: 100.0,
+                },
+            ))
+            .id();
+        death_app.update();
+        assert!(death_app.world().entity(dying_enemy).contains::<Dying>());
+        assert!(
+            death_app
+                .world()
+                .resource::<RunProgress>()
+                .defeated_enemies
+                .contains(&id)
+        );
+
+        let mut progress = RunProgress::default();
+        progress.defeated_enemies.insert(id);
+        let mut map = floor_rect(0..=1, 0..=0);
+        map.place_entity(id.x, id.y, map::MapEntityKind::Enemy);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(GameMap(map))
+            .insert_resource(CombatConfig::default())
+            .insert_resource(progress)
+            .insert_resource(EnemyAnimations {
+                idle: Handle::default(),
+                movement: Handle::default(),
+                stunned: Handle::default(),
+                death: Handle::default(),
+            })
+            .init_resource::<EnemiesSpawned>()
+            .add_systems(Update, spawn_enemies_from_map);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Enemy>>()
+                .iter(app.world())
+                .count(),
+            0
         );
     }
 

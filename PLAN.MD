@@ -302,17 +302,17 @@ Record a defeated enemy when it first enters `Dying`, and record a pickup before
 
 **Goal:** Let living, unstunned enemies visibly attack the player through the generic damage pipeline.
 
-- [ ] Extend `CombatConfig` with melee damage, wind-up, and cooldown values.
-- [ ] Add an explicit enemy attack state machine, for example `Ready`, `WindingUp { remaining }`, and `Cooldown { remaining }`. Avoid separate booleans/timers that can enter contradictory states.
-- [ ] Enemies continue existing chase behavior while out of range. A ready enemy entering `attack_distance` stops and starts wind-up.
-- [ ] Show wind-up clearly without requiring final art: tint/flash the enemy and draw or spawn a shrinking red warning ring at melee range. Source duration/radius from config/state.
-- [ ] At wind-up completion, recheck that the player is alive, damageable, and within `attack_distance`. If so, emit one `Damage` message for `20`; otherwise miss without damage. Enter cooldown in both cases.
-- [ ] Tick cooldown in gameplay. During cooldown, an enemy may resume chasing if the player moves away but cannot start another wind-up until ready.
-- [ ] Applying stun cancels wind-up and resets the enemy to `Ready` when stun expires; it must not release a delayed hit. Dying removes all attack state/telegraph.
-- [ ] Attach stable placement identity to every map-spawned enemy. When an enemy first enters `Dying`, immediately add that identity to current `RunProgress.defeated_enemies`; do not wait for animation despawn.
-- [ ] Enforce state/animation priority: `Dying` > `Stunned` > `WindingUp` > moving/idle. Preserve the existing death and stunned visuals.
-- [ ] Stop enemy attacks once the player has zero health or enters `PlayerDying` in Step 8.
-- [ ] Keep faction and hitbox rules explicit so enemies cannot damage one another.
+- [x] Extend `CombatConfig` with melee damage, wind-up, and cooldown values.
+- [x] Add an explicit enemy attack state machine, for example `Ready`, `WindingUp { remaining }`, and `Cooldown { remaining }`. Avoid separate booleans/timers that can enter contradictory states.
+- [x] Enemies continue existing chase behavior while out of range. A ready enemy entering `attack_distance` stops and starts wind-up.
+- [x] Show wind-up clearly without requiring final art: tint/flash the enemy and draw or spawn a shrinking red warning ring at melee range. Source duration/radius from config/state.
+- [x] At wind-up completion, recheck that the player is alive, damageable, and within `attack_distance`. If so, emit one `Damage` message for `20`; otherwise miss without damage. Enter cooldown in both cases.
+- [x] Tick cooldown in gameplay. During cooldown, an enemy may resume chasing if the player moves away but cannot start another wind-up until ready.
+- [x] Applying stun cancels wind-up and resets the enemy to `Ready` when stun expires; it must not release a delayed hit. Dying removes all attack state/telegraph.
+- [x] Attach stable placement identity to every map-spawned enemy. When an enemy first enters `Dying`, immediately add that identity to current `RunProgress.defeated_enemies`; do not wait for animation despawn.
+- [x] Enforce state/animation priority: `Dying` > `Stunned` > `WindingUp` > moving/idle. Preserve the existing death and stunned visuals.
+- [x] Stop enemy attacks once the player has zero health or enters `PlayerDying` in Step 8.
+- [x] Keep faction and hitbox rules explicit so enemies cannot damage one another.
 
 **Automated acceptance:** Tests cover entering wind-up at range boundary, no early damage, one hit after wind-up, miss after player retreat, cooldown enforcement, player invulnerability, stun cancellation, no attacks while stunned/dying, deterministic damage from multiple enemies, defeat identity recording, and rebuild filtering from checkpoint progress.
 
@@ -411,3 +411,4 @@ Append one entry per completed step using this format:
 - `Step 5 — 2026-08-29`: Added run-scoped visible terminals with stable tile identities, configurable boundary-inclusive AABB triggers, deterministic tile-order activation after movement, checkpoint-first dialogue requests, missing-story system fallback, and dimmed/disabled activated terminal restoration. Added terminal overlap, checkpoint/order, fallback/inactive restoration, deterministic ordering, and one-shot activation tests. Files changed: `src/config.rs`, `src/game.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted terminal tests, `cargo test`, and `cargo check --all-targets` passed. Manual terminal walkthrough/Continue/New Game smoke check not run. Follow-up: pickup detection remains intentionally deferred to Step 6; terminal scheduling is already before the future pickup slot.
 
 - `Step 6 — 2026-08-29`: Added RunProgress-backed skill/armor unlocks, locked-by-default ability/mode gating, dynamic HUD controls, run-scoped map pickups, terminal-priority automatic pickup activation, exact system unlock messages, duplicate skill consumption, and checkpoint-aware full-health armor restoration. Pickup activation is explicitly ordered after terminals and before both HUD refreshes. Added focused progression, popup/priority, armor-at-partial/full-health, silent locked-input, teleport-status, and checkpoint rollback/New Game reset tests. Files changed: `src/config.rs`, `src/progression.rs`, `src/game.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted progression/pickup tests, `cargo test`, and `cargo check --all-targets` passed. Manual pickup walkthrough not run.
+- `Step 7 — 2026-08-29`: Added centralized enemy melee tuning and a mutually exclusive Ready/WindingUp/Cooldown state machine. Living enemies now wind up visibly with a tint and shrinking warning ring, recheck range at impact, emit generic player Damage, enforce cooldown, and cancel attacks when stunned, dying, or the player is at zero health. Enemy death immediately records stable placement progress and spawning filters checkpoint-defeated enemies. Added headless wind-up/hit/cooldown, retreat miss, stun cancel, zero-health player, death-recording, and rebuild-filter coverage. Files changed: `src/config.rs`, `src/game.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted enemy-melee tests, `cargo test`, and `cargo check --all-targets` passed; manual combat smoke check not run.
