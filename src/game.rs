@@ -3766,7 +3766,7 @@ mod tests {
     }
 
     #[test]
-    fn enemy_melee_winds_up_hits_once_and_enforces_cooldown() {
+    fn integration_enemy_windup_damage_and_cooldown() {
         let (mut app, player, enemy) = melee_test_app(Vec2::new(64.0, 0.0));
         app.update();
         assert!(matches!(
@@ -3814,7 +3814,7 @@ mod tests {
     }
 
     #[test]
-    fn enemy_melee_misses_after_retreat_and_stun_cancels_windup() {
+    fn integration_retreat_or_stun_cancels_enemy_windup() {
         let (mut app, player, enemy) = melee_test_app(Vec2::new(64.0, 0.0));
         app.update();
         app.world_mut()
@@ -3855,7 +3855,7 @@ mod tests {
     }
 
     #[test]
-    fn enemy_death_records_placement_and_rebuild_filter_omits_it() {
+    fn integration_enemy_defeat_is_checkpoint_filterable() {
         let id = PlacementId { x: 1, y: 0 };
         let mut death_app = App::new();
         death_app
@@ -4146,7 +4146,7 @@ mod tests {
     }
 
     #[test]
-    fn player_death_is_one_way_disables_hitbox_and_waits_for_presentation() {
+    fn integration_zero_health_stops_controls_and_delays_game_over() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .init_state::<GameState>()
@@ -4524,7 +4524,7 @@ mod tests {
     }
 
     #[test]
-    fn player_health_damage_lifecycle_clamps_and_reports_only_real_hits() {
+    fn integration_damage_grants_invulnerability_then_accepts_later_hit() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<CombatConfig>()
@@ -4722,7 +4722,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_touch_activates_once_and_opens_dialogue_after_checkpoint_capture() {
+    fn integration_terminal_checkpoint_precedes_dialogue_and_does_not_replay() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .init_state::<GameState>()
@@ -4804,7 +4804,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_rebuild_paths_remove_run_entities_and_choose_progress() {
+    fn integration_continue_rolls_back_post_checkpoint_progress_and_new_game_clears_it() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .init_state::<GameState>()
@@ -4897,7 +4897,7 @@ mod tests {
     }
 
     #[test]
-    fn progression_starts_locked_and_gates_modes_and_hud() {
+    fn integration_progression_unlocks_dynamic_hud_controls() {
         let progress = RunProgress::default();
         assert!(progress.unlocked_skills.is_empty());
         assert_eq!(SelectedAttackMode::default().0, AttackMode::Lightning);
@@ -4937,7 +4937,7 @@ mod tests {
     }
 
     #[test]
-    fn pickups_are_one_shot_with_exact_messages_and_armor_health_effect() {
+    fn integration_pickups_are_one_shot_with_exact_messages_and_armor_effect() {
         let config = CombatConfig::default();
         let mut progress = RunProgress::default();
         let mut health = Health {
@@ -5008,7 +5008,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_modes_and_abilities_are_silent_until_unlocked() {
+    fn integration_locked_abilities_are_silent_until_pickup_unlocks_them() {
         let mut mode_app = App::new();
         mode_app
             .add_plugins(MinimalPlugins)
@@ -5148,7 +5148,7 @@ mod tests {
     }
 
     #[test]
-    fn pickup_trigger_is_one_shot_and_terminals_win_shared_overlaps() {
+    fn integration_terminal_pickup_overlap_defers_pickup_to_later_frame() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .init_state::<GameState>()
@@ -5223,7 +5223,75 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_progress_restores_pickups_and_full_armor_health() {
+    fn integration_game_over_ui_uses_exact_actions_and_routes_restarting() {
+        let mut ui_app = App::new();
+        ui_app
+            .add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .add_systems(OnEnter(GameState::GameOver), setup_game_over_ui);
+        ui_app
+            .world_mut()
+            .resource_mut::<NextState<GameState>>()
+            .set(GameState::GameOver);
+        ui_app.update();
+        let labels: Vec<_> = ui_app
+            .world_mut()
+            .query::<&Text>()
+            .iter(ui_app.world())
+            .map(|text| text.0.clone())
+            .collect();
+        assert!(labels.iter().any(|label| label == "Game Over"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "Continue from Last Checkpoint")
+        );
+        assert!(labels.iter().any(|label| label == "Main Menu"));
+        assert!(!labels.iter().any(|label| label == "Retry"));
+
+        for (action, expected) in [
+            (GameOverAction::Continue, RestartIntent::ContinueCheckpoint),
+            (GameOverAction::MainMenu, RestartIntent::MainMenu),
+        ] {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+                .init_state::<GameState>()
+                .init_resource::<RestartRequest>()
+                .add_systems(Update, game_over_action);
+            app.world_mut()
+                .resource_mut::<NextState<GameState>>()
+                .set(GameState::GameOver);
+            app.update();
+            app.world_mut()
+                .spawn((Button, Interaction::Pressed, action));
+            app.update();
+            assert_eq!(app.world().resource::<RestartRequest>().0, expected);
+            app.update();
+            assert_eq!(
+                app.world().resource::<State<GameState>>().get(),
+                &GameState::Restarting
+            );
+        }
+    }
+
+    #[test]
+    fn integration_new_run_uses_implicit_checkpoint_lightning_and_full_health() {
+        let config = CombatConfig::default();
+        let snapshot = CheckpointSnapshot::default();
+        assert_eq!(snapshot.progress, RunProgress::default());
+        assert_eq!(snapshot.respawn, PlacementId::default());
+        assert_eq!(SelectedAttackMode::default().0, AttackMode::Lightning);
+        assert_eq!(
+            restored_player_health(&config, &snapshot.progress),
+            Health {
+                current: 100.0,
+                max: 100.0,
+            }
+        );
+    }
+
+    #[test]
+    fn integration_checkpoint_restores_pickups_and_full_armor_health() {
         let config = CombatConfig::default();
         let pickup = PlacementId { x: 2, y: 3 };
         let mut checkpoint_progress = RunProgress::default();

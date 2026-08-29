@@ -345,7 +345,7 @@ Record a defeated enemy when it first enters `Dying`, and record a pickup before
 
 **Goal:** Verify all features interact correctly and leave implementation guidance current.
 
-- [ ] Add compact headless integration scenarios with manually advanced time:
+- [x] Add compact headless integration scenarios with manually advanced time:
   1. New run starts at `100/100`, lightning selected, all optional skills locked.
   2. Enemy wind-up → damage → invulnerability → later damage → zero health → delayed game over.
   3. Retreat or stun during wind-up prevents damage.
@@ -357,12 +357,12 @@ Record a defeated enemy when it first enters `Dying`, and record a pickup before
   9. Collect/defeat before a terminal, collect/defeat after it, then Continue: only pre-checkpoint progress remains consumed/defeated, the player has full checkpoint-appropriate health, and restoration occurs exactly once.
   10. Before any terminal, Continue uses the implicit initial-spawn snapshot.
   11. Main Menu → New Game discards all checkpoint progress.
-- [ ] Audit all gameplay systems and ensure they run only in `Game`, except intentional dialogue/game-over/restart UI and camera restoration.
-- [ ] Audit every spawned runtime entity for `RunScoped` ownership or parent ownership under a run-scoped entity.
-- [ ] Check simultaneous input priority after progression changes: dialogue/game-over UI first by state; in gameplay terminal trigger, then pickup trigger, then existing stun/teleport/fire/movement ordering.
-- [ ] Update `README.md` with dynamic controls, health/game-over/checkpoint flow, terminal/pickup editor keys, dialogue schema/path, tuning locations, and precise Continue versus New Game semantics.
-- [ ] Update any placeholder asset documentation if new marker art was added.
-- [ ] Run the complete final automated gate and record results.
+- [x] Audit all gameplay systems and ensure they run only in `Game`, except intentional dialogue/game-over/restart UI and camera restoration.
+- [x] Audit every spawned runtime entity for `RunScoped` ownership or parent ownership under a run-scoped entity.
+- [x] Check simultaneous input priority after progression changes: dialogue/game-over UI first by state; in gameplay terminal trigger, then pickup trigger, then existing stun/teleport/fire/movement ordering.
+- [x] Update `README.md` with dynamic controls, health/game-over/checkpoint flow, terminal/pickup editor keys, dialogue schema/path, tuning locations, and precise Continue versus New Game semantics.
+- [x] Update any placeholder asset documentation if new marker art was added. No new placeholder art was added; editor markers are procedural colors/text.
+- [x] Run the complete final automated gate and record results.
 - [ ] Run a release build only if time permits.
 
 **Final automated gate:**
@@ -413,3 +413,4 @@ Append one entry per completed step using this format:
 - `Step 6 — 2026-08-29`: Added RunProgress-backed skill/armor unlocks, locked-by-default ability/mode gating, dynamic HUD controls, run-scoped map pickups, terminal-priority automatic pickup activation, exact system unlock messages, duplicate skill consumption, and checkpoint-aware full-health armor restoration. Pickup activation is explicitly ordered after terminals and before both HUD refreshes. Added focused progression, popup/priority, armor-at-partial/full-health, silent locked-input, teleport-status, and checkpoint rollback/New Game reset tests. Files changed: `src/config.rs`, `src/progression.rs`, `src/game.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted progression/pickup tests, `cargo test`, and `cargo check --all-targets` passed. Manual pickup walkthrough not run.
 - `Step 7 — 2026-08-29`: Added centralized enemy melee tuning and a mutually exclusive Ready/WindingUp/Cooldown state machine. Living enemies now wind up visibly with a tint and shrinking warning ring, recheck range at impact, emit generic player Damage, enforce cooldown, and cancel attacks when stunned, dying, or the player is at zero health. Enemy death immediately records stable placement progress and spawning filters checkpoint-defeated enemies. Added headless wind-up/hit/cooldown, retreat miss, stun cancel, zero-health player, death-recording, and rebuild-filter coverage. Files changed: `src/config.rs`, `src/game.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted enemy-melee tests, `cargo test`, and `cargo check --all-targets` passed; manual combat smoke check not run.
 - `Step 8 — 2026-08-29`: Added a one-way player death presentation, centralized 0.75 s tuning, zero-health input/trigger/fire guards, transient combat-message reset, enemy attack suppression, and a Game Over modal with Continue from Last Checkpoint/Main Menu restart actions. Existing restart/rebuild filtering restores checkpoint progress and full health. Added focused one-way/death-delay coverage; prior restart/progression/terminal tests cover portions of restoration. Files changed: `src/config.rs`, `src/game.rs`, `PLAN.MD`. Final `cargo fmt --check`, targeted death test, `cargo test`, and `cargo check --all-targets` passed; manual death/checkpoint walkthrough not run. Follow-up: dedicated game-over button and complete checkpoint restoration scenario coverage remain for Step 9 integration hardening.
+- `Step 9 — 2026-08-29`: Added a cohesive 15-test `integration_*` headless suite by promoting the compact cross-feature scenarios for run defaults, enemy wind-up/cooldown/retreat/stun, damage invulnerability, delayed death/game-over, terminal checkpoint/dialogue, terminal-pickup priority, pickup unlocks, checkpoint rollback, defeat filtering, and game-over restart actions. The game-over action test now proves the queued state reaches `Restarting`. Audited gameplay schedule gates and run ownership; no new placeholder asset documentation was needed because markers remain procedural. Updated README with dynamic progression controls and precise checkpoint semantics. Final `cargo fmt --check`, targeted `cargo test integration_` (15 tests), `cargo test` (84 tests), and `cargo check --all-targets` passed. Manual regression script and release build were not run.
