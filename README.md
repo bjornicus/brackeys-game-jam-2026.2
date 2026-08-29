@@ -60,4 +60,4 @@ runtime and map editor use them to connect terminals to dialogue.
 
 Temporary checked-in sheets and their stable replacement layout are documented in [`assets/sprites/PLACEHOLDERS.md`](assets/sprites/PLACEHOLDERS.md). Regenerate them with `python3 tools/generate_placeholder_sprites.py`.
 
-Gameplay values, including player health/hitbox/invulnerability/death timing, enemy melee ranges/damage/timers, terminal and pickup trigger sizes, armor values, teleport cooldown, stun, and camera shake, are centralized in `src/config.rs` (`CombatConfig` and `CameraShakeConfig`).
+Gameplay values, including player health/hitbox/invulnerability/death timing, enemy melee ranges/damage/timers, the 25% health-drop chance and 25-health healing amount, terminal and pickup trigger sizes, armor values, teleport cooldown, stun, and camera shake, are centralized in `src/config.rs` (`CombatConfig` and `CameraShakeConfig`).

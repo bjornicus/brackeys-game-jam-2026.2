@@ -20,7 +20,7 @@ const PAUSE_BUTTON_PRESSED: Color = Color::srgb(0.12, 0.65, 0.35);
 use crate::{
     GameState,
     config::{CameraShakeConfig, CombatConfig},
-    game_dialogue::{DialogueSource, request_dialogue},
+    game_dialogue::{ActiveDialogue, DialogueSource, request_dialogue},
 };
 
 // This plugin contains the game.
@@ -1073,10 +1073,17 @@ fn activate_touched_health_drop(
     drops: Query<(Entity, &Transform), With<HealthDropTrigger>>,
     terminals: Query<(&Transform, &Terminal), With<TerminalTrigger>>,
     pickups: Query<(&Transform, &Pickup), With<PickupTrigger>>,
+    dialogue: Option<Res<ActiveDialogue>>,
     config: Res<CombatConfig>,
 ) {
     let (transform, collider, mut health, dying) = player.into_inner();
-    if dying.is_some() || health.current <= 0.0 || health.current >= health.max {
+    // Higher-priority terminal and progression-pickup commands may already have removed their
+    // triggers in this chained frame. Their active modal is the authoritative priority marker.
+    if dialogue.is_some()
+        || dying.is_some()
+        || health.current <= 0.0
+        || health.current >= health.max
+    {
         return;
     }
     let overlaps = |position: Vec2, size: Vec2| {
@@ -5830,6 +5837,331 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    fn health_drop_test_app(health: Health) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<CombatConfig>()
+            .add_systems(Update, activate_touched_health_drop);
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerCollider(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                health,
+                Transform::default(),
+            ))
+            .id();
+        (app, player)
+    }
+
+    fn spawn_test_health_drop(app: &mut App, position: Vec2) -> Entity {
+        app.world_mut()
+            .spawn((
+                HealthDrop {
+                    source: PlacementId::default(),
+                },
+                HealthDropTrigger,
+                RunScoped,
+                Transform::from_translation(position.extend(3.0)),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn health_drop_heals_partially_caps_and_refreshes_hud_in_one_frame() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<CombatConfig>()
+            .add_systems(
+                Update,
+                (activate_touched_health_drop, update_player_health_hud).chain(),
+            );
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerCollider(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Health {
+                    current: 60.0,
+                    max: 100.0,
+                },
+                Transform::default(),
+            ))
+            .id();
+        let text = app
+            .world_mut()
+            .spawn((PlayerHealthText, Text::new("stale")))
+            .id();
+        let fill = app
+            .world_mut()
+            .spawn((PlayerHealthBarFill, Node::default()))
+            .id();
+        let first = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            85.0
+        );
+        assert!(app.world().get_entity(first).is_err());
+        assert_eq!(
+            app.world().entity(text).get::<Text>().unwrap().0,
+            "Health: 85 / 100"
+        );
+        assert_eq!(
+            app.world().entity(fill).get::<Node>().unwrap().width,
+            Val::Percent(85.0)
+        );
+
+        let second = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            100.0
+        );
+        assert!(app.world().get_entity(second).is_err());
+    }
+
+    #[test]
+    fn health_drop_stays_for_full_or_dead_players_and_accepts_exact_boundary() {
+        let (mut app, player) = health_drop_test_app(Health {
+            current: 100.0,
+            max: 100.0,
+        });
+        let full_drop = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        app.update();
+        assert!(app.world().get_entity(full_drop).is_ok());
+
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<Health>()
+            .unwrap()
+            .current = 0.0;
+        app.update();
+        assert!(app.world().get_entity(full_drop).is_ok());
+
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<Health>()
+            .unwrap()
+            .current = 50.0;
+        app.world_mut()
+            .entity_mut(player)
+            .insert(PlayerDying { remaining: 1.0 });
+        app.update();
+        assert!(app.world().get_entity(full_drop).is_ok());
+        app.world_mut().entity_mut(player).remove::<PlayerDying>();
+        app.world_mut().despawn(full_drop);
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation
+            .x = 38.0;
+        let boundary_drop = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        app.update();
+        assert!(app.world().get_entity(boundary_drop).is_err());
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            75.0
+        );
+    }
+
+    #[test]
+    fn health_drop_selects_one_and_defers_to_terminal_or_progression_pickup() {
+        let (mut app, player) = health_drop_test_app(Health {
+            current: 25.0,
+            max: 100.0,
+        });
+        let first = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        let second = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        app.update();
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            50.0
+        );
+        assert_eq!(
+            [first, second]
+                .into_iter()
+                .filter(|entity| app.world().get_entity(*entity).is_ok())
+                .count(),
+            1
+        );
+
+        let terminal = app
+            .world_mut()
+            .spawn((
+                Terminal {
+                    placement: PlacementId::default(),
+                    dialogue_id: "intro".into(),
+                    activated: false,
+                },
+                TerminalTrigger,
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut()
+            .entity_mut(player)
+            .get_mut::<Health>()
+            .unwrap()
+            .current = 25.0;
+        let terminal_priority_drop = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        app.update();
+        assert!(app.world().get_entity(terminal_priority_drop).is_ok());
+        app.world_mut().despawn(terminal);
+
+        let mut pickup_app = App::new();
+        pickup_app
+            .add_plugins(MinimalPlugins)
+            .init_resource::<CombatConfig>()
+            .init_resource::<RunProgress>()
+            .init_resource::<NextState<GameState>>()
+            .add_systems(
+                Update,
+                (activate_touched_pickup, activate_touched_health_drop).chain(),
+            );
+        let pickup_player = pickup_app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerCollider(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Health {
+                    current: 25.0,
+                    max: 100.0,
+                },
+                Transform::default(),
+            ))
+            .id();
+        pickup_app.world_mut().spawn((
+            Pickup {
+                placement: PlacementId { x: 2, y: 2 },
+                kind: PickupKind::Skill(Skill::Stun),
+            },
+            PickupTrigger,
+            Transform::default(),
+        ));
+        let pickup_priority_drop = spawn_test_health_drop(&mut pickup_app, Vec2::ZERO);
+        pickup_app.update();
+        assert!(pickup_app.world().get_entity(pickup_priority_drop).is_ok());
+        assert_eq!(
+            pickup_app
+                .world()
+                .entity(pickup_player)
+                .get::<Health>()
+                .unwrap()
+                .current,
+            25.0
+        );
+    }
+
+    #[test]
+    fn health_drop_defers_to_actual_terminal_activation_in_the_same_frame() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<CombatConfig>()
+            .init_resource::<RunProgress>()
+            .init_resource::<CheckpointSnapshot>()
+            .init_resource::<NextState<GameState>>()
+            .insert_resource(StoryDialogueCatalog(DialogueCatalog {
+                conversations: std::collections::BTreeMap::from([(
+                    "terminal".to_owned(),
+                    vec![DialogueLine {
+                        speaker: Speaker::System,
+                        text: "checkpoint before healing".to_owned(),
+                    }],
+                )]),
+            }))
+            .add_systems(
+                Update,
+                (activate_touched_terminal, activate_touched_health_drop).chain(),
+            );
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerCollider(Collider::new(Vec2::splat(20.0), Vec2::ZERO)),
+                Health {
+                    current: 25.0,
+                    max: 100.0,
+                },
+                Transform::default(),
+            ))
+            .id();
+        let terminal_id = PlacementId { x: 2, y: -1 };
+        let terminal = app
+            .world_mut()
+            .spawn((
+                Terminal {
+                    placement: terminal_id,
+                    dialogue_id: "terminal".to_owned(),
+                    activated: false,
+                },
+                TerminalTrigger,
+                Sprite::default(),
+                Transform::default(),
+            ))
+            .id();
+        let drop = spawn_test_health_drop(&mut app, Vec2::ZERO);
+
+        app.update();
+
+        assert!(app.world().get_entity(drop).is_ok());
+        assert_eq!(
+            app.world().entity(player).get::<Health>().unwrap().current,
+            25.0
+        );
+        assert!(
+            app.world()
+                .entity(terminal)
+                .get::<Terminal>()
+                .unwrap()
+                .activated
+        );
+        assert_eq!(
+            app.world().resource::<CheckpointSnapshot>().respawn,
+            terminal_id
+        );
+        assert_eq!(
+            app.world().resource::<ActiveDialogue>().source,
+            DialogueSource::Terminal
+        );
+    }
+
+    #[test]
+    fn health_drop_restart_preserves_continue_seed_and_new_game_refreshes_it() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .init_resource::<RestartRequest>()
+            .init_resource::<RunProgress>()
+            .init_resource::<CheckpointSnapshot>()
+            .init_resource::<SelectedAttackMode>()
+            .init_resource::<TeleportCooldown>()
+            .init_resource::<AttackFeedback>()
+            .init_resource::<CollisionDebug>()
+            .init_resource::<CameraShakeConfig>()
+            .init_resource::<EnemiesSpawned>()
+            .init_resource::<TerminalsSpawned>()
+            .init_resource::<PickupsSpawned>()
+            .init_resource::<HealthDropSeed>()
+            .init_resource::<HealthDropSeedSequence>()
+            .init_resource::<PlayerSpawn>()
+            .init_resource::<RunNeedsSpawn>()
+            .add_systems(Update, restart_run);
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::NewGame;
+        app.update();
+        let seed = *app.world().resource::<HealthDropSeed>();
+        let drop = spawn_test_health_drop(&mut app, Vec2::ZERO);
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::ContinueCheckpoint;
+        app.update();
+        assert_eq!(*app.world().resource::<HealthDropSeed>(), seed);
+        assert!(app.world().get_entity(drop).is_err());
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::MainMenu;
+        app.update();
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::NewGame;
+        app.update();
+        assert_ne!(*app.world().resource::<HealthDropSeed>(), seed);
     }
 
     #[test]
