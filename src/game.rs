@@ -6,6 +6,7 @@ use bevy_spritesheet_animation::prelude::*;
 use map_support::{
     collision::{self, Collider},
     map,
+    progression::{CheckpointSnapshot, PlacementId, RunProgress},
     tilemap::{self, TerrainAtlas, TerrainTilemapPlugin},
 };
 
@@ -30,6 +31,11 @@ pub fn game_plugin(app: &mut App) {
         .init_resource::<TeleportCooldown>()
         .init_resource::<CameraShakeConfig>()
         .init_resource::<EnemiesSpawned>()
+        .init_resource::<RestartRequest>()
+        .init_resource::<RunProgress>()
+        .init_resource::<CheckpointSnapshot>()
+        .init_resource::<PlayerSpawn>()
+        .init_resource::<RunNeedsSpawn>()
         .add_message::<AttackFired>()
         .add_systems(PreStartup, setup_enemy_animations)
         .add_message::<Damage>();
@@ -40,9 +46,12 @@ pub fn game_plugin(app: &mut App) {
             setup_instructions,
             spawn_character,
             setup_camera_shake,
-        ),
+            finish_run_setup,
+        )
+            .chain(),
     )
     .add_systems(OnEnter(GameState::Paused), pause_menu_setup)
+    .add_systems(OnEnter(GameState::Restarting), restart_run)
     .add_systems(
         Update,
         (
@@ -99,7 +108,12 @@ pub fn game_plugin(app: &mut App) {
     )
     // Restore before cursor conversion/gameplay, then shake only for rendering.
     .add_systems(PreUpdate, restore_camera_transform)
-    .add_systems(PostUpdate, shake_camera.before(TransformSystems::Propagate));
+    .add_systems(
+        PostUpdate,
+        shake_camera
+            .before(TransformSystems::Propagate)
+            .run_if(in_state(GameState::Game)),
+    );
 }
 
 /// Player movement speed factor.
@@ -176,6 +190,38 @@ struct EnemyAnimations {
 
 #[derive(Resource)]
 struct GameMap(map::MapData);
+
+#[allow(dead_code)] // Step 5/7 consume this stable identity.
+#[derive(Component, Clone, Copy, Debug)]
+struct Placement(PlacementId);
+
+/// Marks a top-level entity that belongs to the current disposable game run.
+#[derive(Component)]
+pub(crate) struct RunScoped;
+
+/// Which clean rebuild the one-frame Restarting state performs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum RestartIntent {
+    #[default]
+    NewGame,
+    ContinueCheckpoint,
+    MainMenu,
+}
+
+#[derive(Resource, Debug, Default)]
+pub(crate) struct RestartRequest(pub(crate) RestartIntent);
+
+#[derive(Resource, Clone, Copy, Debug, Default)]
+struct PlayerSpawn(Vec2);
+
+#[derive(Resource)]
+struct RunNeedsSpawn(bool);
+
+impl Default for RunNeedsSpawn {
+    fn default() -> Self {
+        Self(true)
+    }
+}
 
 #[derive(Resource, Default)]
 struct CollisionDebug {
@@ -304,9 +350,6 @@ enum Faction {
     Enemy,
 }
 
-#[derive(Resource)]
-struct GameInitialized;
-
 #[derive(Component)]
 enum PauseMenuAction {
     Resume,
@@ -378,19 +421,89 @@ fn setup_enemy_animations(
 fn setup_scene(
     mut commands: Commands,
     terrain_atlas: Res<TerrainAtlas>,
-    initialized: Option<Res<GameInitialized>>,
+    game_map: Option<Res<GameMap>>,
+    needs_spawn: Res<RunNeedsSpawn>,
 ) {
-    if initialized.is_some() {
+    if !needs_spawn.0 {
         return;
     }
+    let map = game_map.as_ref().map_or_else(
+        || {
+            map::load_map("initial").unwrap_or_else(|error| {
+                warn!("Could not load initial map: {error}. Using the built-in map.");
+                map::MapData::initial()
+            })
+        },
+        |map| map.0.clone(),
+    );
+    if game_map.is_none() {
+        commands.insert_resource(GameMap(map.clone()));
+    }
+    for terrain in tilemap::spawn_map(&mut commands, &terrain_atlas, &map) {
+        commands.entity(terrain).insert(RunScoped);
+    }
+}
 
-    commands.insert_resource(GameInitialized);
-    let map = map::load_map("initial").unwrap_or_else(|error| {
-        warn!("Could not load initial map: {error}. Using the built-in map.");
-        map::MapData::initial()
-    });
-    commands.insert_resource(GameMap(map.clone()));
-    tilemap::spawn_map(&mut commands, &terrain_atlas, &map);
+fn finish_run_setup(mut needs_spawn: ResMut<RunNeedsSpawn>) {
+    needs_spawn.0 = false;
+}
+
+/// Removes the current run and schedules its clean replacement. The map asset stays immutable
+/// in `GameMap`; later steps use `RunProgress` to filter its placements during rebuilding.
+fn restart_run(
+    mut commands: Commands,
+    run_entities: Query<Entity, With<RunScoped>>,
+    mut intent: ResMut<RestartRequest>,
+    mut progress: ResMut<RunProgress>,
+    mut checkpoint: ResMut<CheckpointSnapshot>,
+    mut selected_mode: ResMut<SelectedAttackMode>,
+    mut teleport: ResMut<TeleportCooldown>,
+    mut feedback: ResMut<AttackFeedback>,
+    mut collision_debug: ResMut<CollisionDebug>,
+    mut shake: ResMut<CameraShakeConfig>,
+    mut enemies_spawned: ResMut<EnemiesSpawned>,
+    mut player_spawn: ResMut<PlayerSpawn>,
+    mut needs_spawn: ResMut<RunNeedsSpawn>,
+    mut cameras: Query<(&UnshakenCameraTransform, &mut Transform), With<Camera2d>>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    for entity in &run_entities {
+        commands.entity(entity).despawn();
+    }
+    for (unshaken, mut transform) in &mut cameras {
+        *transform = unshaken.0;
+    }
+    *selected_mode = SelectedAttackMode::default();
+    *teleport = TeleportCooldown::default();
+    *feedback = AttackFeedback::default();
+    *collision_debug = CollisionDebug::default();
+    shake.trauma = 0.0;
+    enemies_spawned.0 = false;
+    needs_spawn.0 = true;
+
+    match intent.0 {
+        RestartIntent::NewGame => {
+            *progress = RunProgress::default();
+            *checkpoint = CheckpointSnapshot::default();
+            *player_spawn = PlayerSpawn::default();
+            next_state.set(GameState::Game);
+        }
+        RestartIntent::ContinueCheckpoint => {
+            *progress = checkpoint.progress.clone();
+            player_spawn.0 = Vec2::new(
+                checkpoint.respawn.x as f32 * map::TILE_SIZE,
+                checkpoint.respawn.y as f32 * map::TILE_SIZE,
+            );
+            next_state.set(GameState::Game);
+        }
+        RestartIntent::MainMenu => {
+            *progress = RunProgress::default();
+            *checkpoint = CheckpointSnapshot::default();
+            *player_spawn = PlayerSpawn::default();
+            next_state.set(GameState::Menu);
+        }
+    }
+    intent.0 = RestartIntent::NewGame;
 }
 
 fn spawn_character(
@@ -398,12 +511,12 @@ fn spawn_character(
     assets: Res<AssetServer>,
     mut animations: ResMut<Assets<Animation>>,
     mut atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
-    initialized: Option<Res<GameInitialized>>,
+    spawn: Res<PlayerSpawn>,
+    needs_spawn: Res<RunNeedsSpawn>,
 ) {
-    if initialized.is_some() {
+    if !needs_spawn.0 {
         return;
     }
-
     // Create the animations
 
     let image = assets.load("sprites/character_placeholder.png");
@@ -463,13 +576,14 @@ fn spawn_character(
         .sprite(&mut atlas_layouts);
 
     commands.spawn((
+        RunScoped,
         Player,
         Faction::Player,
         PlayerCollider(Collider::new(PLAYER_COLLIDER_SIZE, PLAYER_COLLIDER_OFFSET)),
         Facing::Right,
         sprite,
         SpritesheetAnimation::new(idle[Facing::Right.animation_index()].clone()),
-        Transform::from_xyz(0., 0., 2.),
+        Transform::from_xyz(spawn.0.x, spawn.0.y, 2.),
     ));
 }
 
@@ -499,6 +613,11 @@ fn spawn_enemies_from_map(
             continue;
         }
         commands.spawn((
+            RunScoped,
+            Placement(PlacementId {
+                x: placement.x,
+                y: placement.y,
+            }),
             Enemy,
             Faction::Enemy,
             Facing::Down,
@@ -598,12 +717,15 @@ fn cast_stun(
                 .insert(refreshed_stun(combat_config.stun_duration));
         }
     }
-    commands.spawn(ShockwaveVisual {
-        origin,
-        elapsed: 0.0,
-        duration: combat_config.shockwave_animation_duration,
-        radius: combat_config.shockwave_radius,
-    });
+    commands.spawn((
+        RunScoped,
+        ShockwaveVisual {
+            origin,
+            elapsed: 0.0,
+            duration: combat_config.shockwave_animation_duration,
+            radius: combat_config.shockwave_radius,
+        },
+    ));
     shake.trauma = (shake.trauma + shake.trauma_per_stun).clamp(0.0, 1.0);
 }
 
@@ -771,12 +893,12 @@ fn finish_enemy_deaths(
     }
 }
 
-fn setup_instructions(mut commands: Commands, initialized: Option<Res<GameInitialized>>) {
-    if initialized.is_some() {
+fn setup_instructions(mut commands: Commands, needs_spawn: Res<RunNeedsSpawn>) {
+    if !needs_spawn.0 {
         return;
     }
-
     commands.spawn((
+        RunScoped,
         AttackHud,
         Text::new(format_attack_hud(
             AttackMode::Auto,
@@ -941,7 +1063,11 @@ fn pause_menu_action(
 fn setup_camera_shake(
     mut commands: Commands,
     cameras: Query<(Entity, &Transform), (With<Camera2d>, Without<UnshakenCameraTransform>)>,
+    needs_spawn: Res<RunNeedsSpawn>,
 ) {
+    if !needs_spawn.0 {
+        return;
+    }
     for (camera, transform) in &cameras {
         commands
             .entity(camera)
@@ -1486,6 +1612,7 @@ fn handle_lightning_attacks(
         }
 
         commands.spawn((
+            RunScoped,
             LightningVisual {
                 start: fired.request.origin,
                 end: fired.request.target,
@@ -1521,6 +1648,7 @@ fn spawn_projectiles(
         }
 
         commands.spawn((
+            RunScoped,
             Projectile {
                 owner: fired.entity,
                 faction: Faction::Player,
@@ -3109,6 +3237,61 @@ mod tests {
                 .translation
                 .y
                 > 0.0
+        );
+    }
+
+    #[test]
+    fn restart_rebuild_paths_remove_run_entities_and_choose_progress() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<GameState>()
+            .init_resource::<RestartRequest>()
+            .init_resource::<RunProgress>()
+            .init_resource::<CheckpointSnapshot>()
+            .init_resource::<SelectedAttackMode>()
+            .init_resource::<TeleportCooldown>()
+            .init_resource::<AttackFeedback>()
+            .init_resource::<CollisionDebug>()
+            .init_resource::<CameraShakeConfig>()
+            .init_resource::<EnemiesSpawned>()
+            .init_resource::<PlayerSpawn>()
+            .init_resource::<RunNeedsSpawn>()
+            .add_systems(Update, restart_run);
+        let old = app.world_mut().spawn(RunScoped).id();
+        let checkpoint_id = PlacementId { x: 3, y: -2 };
+        app.world_mut()
+            .resource_mut::<CheckpointSnapshot>()
+            .progress
+            .defeated_enemies
+            .insert(checkpoint_id);
+        app.world_mut().resource_mut::<CheckpointSnapshot>().respawn = checkpoint_id;
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::ContinueCheckpoint;
+        app.update();
+
+        assert!(app.world().get_entity(old).is_err());
+        assert!(
+            app.world()
+                .resource::<RunProgress>()
+                .defeated_enemies
+                .contains(&checkpoint_id)
+        );
+        assert_eq!(
+            app.world().resource::<PlayerSpawn>().0,
+            Vec2::new(3.0 * map::TILE_SIZE, -2.0 * map::TILE_SIZE)
+        );
+        assert!(app.world().resource::<RunNeedsSpawn>().0);
+
+        app.world_mut().resource_mut::<RestartRequest>().0 = RestartIntent::NewGame;
+        app.update();
+        assert!(
+            app.world()
+                .resource::<RunProgress>()
+                .defeated_enemies
+                .is_empty()
+        );
+        assert_eq!(
+            *app.world().resource::<CheckpointSnapshot>(),
+            CheckpointSnapshot::default()
         );
     }
 }

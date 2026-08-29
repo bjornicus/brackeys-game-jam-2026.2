@@ -46,10 +46,12 @@ fn initialize_terrain_atlas(
     });
 }
 
-pub fn spawn_map(commands: &mut Commands, atlas: &TerrainAtlas, map: &MapData) {
-    for tile in &map.tiles {
-        spawn_tile(commands, atlas, *tile, map.atlas_index_for(*tile));
-    }
+/// Spawns terrain and returns its top-level entity IDs so a game run can own them.
+pub fn spawn_map(commands: &mut Commands, atlas: &TerrainAtlas, map: &MapData) -> Vec<Entity> {
+    map.tiles
+        .iter()
+        .map(|tile| spawn_tile(commands, atlas, *tile, map.atlas_index_for(*tile)))
+        .collect()
 }
 
 pub fn spawn_tile(
@@ -57,17 +59,19 @@ pub fn spawn_tile(
     atlas: &TerrainAtlas,
     tile: MapTile,
     atlas_index: usize,
-) {
-    commands.spawn((
-        TerrainMapTile,
-        Sprite {
-            image: atlas.image.clone(),
-            texture_atlas: Some(TextureAtlas {
-                layout: atlas.layout.clone(),
-                index: atlas_index,
-            }),
-            ..default()
-        },
-        Transform::from_xyz(tile.x as f32 * TILE_SIZE, tile.y as f32 * TILE_SIZE, 0.0),
-    ));
+) -> Entity {
+    commands
+        .spawn((
+            TerrainMapTile,
+            Sprite {
+                image: atlas.image.clone(),
+                texture_atlas: Some(TextureAtlas {
+                    layout: atlas.layout.clone(),
+                    index: atlas_index,
+                }),
+                ..default()
+            },
+            Transform::from_xyz(tile.x as f32 * TILE_SIZE, tile.y as f32 * TILE_SIZE, 0.0),
+        ))
+        .id()
 }

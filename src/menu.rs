@@ -11,7 +11,10 @@ use bevy::{
 const TEXT_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 const MENU_BACKGROUND_COLOR: Srgba = CORNFLOWER_BLUE;
 
-use crate::{GameState, Setting, Volume};
+use crate::{
+    GameState, Setting, Volume,
+    game::{RestartIntent, RestartRequest},
+};
 
 // This plugin manages the menu, with a main menu and a sound settings screen.
 pub fn menu_plugin(app: &mut App) {
@@ -303,6 +306,7 @@ fn menu_action(
     mut app_exit_writer: MessageWriter<AppExit>,
     mut menu_state: ResMut<NextState<MenuState>>,
     mut game_state: ResMut<NextState<GameState>>,
+    mut restart: ResMut<RestartRequest>,
 ) {
     for (interaction, menu_button_action) in &interaction_query {
         if *interaction == Interaction::Pressed {
@@ -311,7 +315,8 @@ fn menu_action(
                     app_exit_writer.write(AppExit::Success);
                 }
                 MenuButtonAction::Play => {
-                    game_state.set(GameState::Game);
+                    restart.0 = RestartIntent::NewGame;
+                    game_state.set(GameState::Restarting);
                     menu_state.set(MenuState::Disabled);
                 }
                 MenuButtonAction::Settings => menu_state.set(MenuState::SettingsSound),

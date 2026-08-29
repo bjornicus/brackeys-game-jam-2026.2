@@ -17,6 +17,9 @@ enum GameState {
     Menu,
     Game,
     Paused,
+    Dialogue,
+    GameOver,
+    Restarting,
 }
 
 #[derive(Component)]
