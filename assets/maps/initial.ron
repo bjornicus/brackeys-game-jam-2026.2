@@ -4419,4 +4419,8 @@
             kind: Enemy,
         ),
     ],
+    player_spawn: Some((
+        x: -1,
+        y: -9,
+    )),
 )

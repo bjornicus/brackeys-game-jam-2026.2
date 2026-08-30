@@ -26,6 +26,7 @@ struct EditorMap {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PaletteSelection {
     Terrain(TerrainTile),
+    PlayerSpawn,
     Entity(EntityPalette),
 }
 
@@ -164,6 +165,7 @@ fn setup(mut commands: Commands, atlas: Res<TerrainAtlas>, editor_map: Res<Edito
                 PaletteSelection::Entity(EntityPalette::ReinforcedArmor),
                 "8 Armor"
             ),
+            palette_button(PaletteSelection::PlayerSpawn, "9 Spawn"),
             (
                 Text::new("Ctrl+S save"),
                 TextFont {
@@ -232,31 +234,58 @@ fn redraw_map(
 }
 
 fn spawn_entity_markers(commands: &mut Commands, map: &MapData) {
+    if let Some(spawn) = map.player_spawn {
+        spawn_marker(
+            commands,
+            spawn.x,
+            spawn.y,
+            Color::srgba(0.2, 0.9, 0.35, 0.8),
+            "SPAWN",
+            TILE_SIZE * 0.7,
+            0.9,
+        );
+    }
     for entity in &map.entities {
         let (color, label) = marker_style(&entity.kind);
-        commands.spawn((
-            EntityMarker,
-            Sprite {
-                color,
-                custom_size: Some(Vec2::splat(TILE_SIZE * 0.52)),
+        spawn_marker(
+            commands,
+            entity.x,
+            entity.y,
+            color,
+            label,
+            TILE_SIZE * 0.52,
+            1.0,
+        );
+    }
+}
+
+fn spawn_marker(
+    commands: &mut Commands,
+    x: i32,
+    y: i32,
+    color: Color,
+    label: &'static str,
+    size: f32,
+    z: f32,
+) {
+    commands.spawn((
+        EntityMarker,
+        Sprite {
+            color,
+            custom_size: Some(Vec2::splat(size)),
+            ..default()
+        },
+        Transform::from_xyz(x as f32 * TILE_SIZE, y as f32 * TILE_SIZE, z),
+        children![(
+            Text2d::new(label),
+            TextFont {
+                font_size: FontSize::Px(15.0),
                 ..default()
             },
-            Transform::from_xyz(
-                entity.x as f32 * TILE_SIZE,
-                entity.y as f32 * TILE_SIZE,
-                1.0,
-            ),
-            children![(
-                Text2d::new(label),
-                TextFont {
-                    font_size: FontSize::Px(15.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                Transform::from_xyz(0.0, 0.0, 1.0),
-            )],
-        ));
-    }
+            TextColor(Color::WHITE),
+            Transform::from_xyz(0.0, 0.0, 1.0),
+        )],
+    ));
 }
 
 fn marker_style(kind: &MapEntityKind) -> (Color, &'static str) {
@@ -280,6 +309,9 @@ fn palette_input(keyboard: Res<ButtonInput<KeyCode>>, mut editor_map: ResMut<Edi
     }
     if keyboard.just_pressed(KeyCode::Digit2) {
         editor_map.selected = PaletteSelection::Terrain(TerrainTile::Wall);
+    }
+    if keyboard.just_pressed(KeyCode::Digit9) {
+        editor_map.selected = PaletteSelection::PlayerSpawn;
     }
     for (entity, _, key) in EntityPalette::ALL {
         if keyboard.just_pressed(key) {
@@ -351,6 +383,12 @@ fn paint_map(
         (PaletteSelection::Terrain(_), false) => {
             editor_map.map.remove(x, y);
         }
+        (PaletteSelection::PlayerSpawn, true) => {
+            editor_map.map.try_set_player_spawn(x, y);
+        }
+        (PaletteSelection::PlayerSpawn, false) => {
+            editor_map.map.remove_player_spawn(x, y);
+        }
         (PaletteSelection::Entity(entity), true) => {
             let dialogue_id = editor_map
                 .dialogue_ids
@@ -406,6 +444,9 @@ fn update_palette_help(editor_map: Res<EditorMap>, mut text: Single<&mut Text, W
             "Terminal dialogue: {}  ([ / ] to cycle)",
             editor_map.dialogue_ids.get(editor_map.selected_dialogue).map(String::as_str).unwrap_or("no valid dialogue IDs"),
         ),
+        None if editor_map.selected == PaletteSelection::PlayerSpawn => {
+            "Player spawn requires an explicit floor tile. Left click moves it; right click removes it.".into()
+        }
         None => "Entity placement requires an explicit floor tile. Right click removes only entities in entity modes.".into(),
     };
 }
@@ -456,6 +497,7 @@ mod tests {
                     dialogue_id: "missing".into(),
                 },
             }],
+            player_spawn: None,
         };
         assert!(
             validate_terminal_references(&map, &["known".into()])

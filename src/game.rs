@@ -600,6 +600,8 @@ fn setup_scene(
     mut commands: Commands,
     terrain_atlas: Res<TerrainAtlas>,
     game_map: Option<Res<GameMap>>,
+    mut player_spawn: ResMut<PlayerSpawn>,
+    mut checkpoint: ResMut<CheckpointSnapshot>,
     needs_spawn: Res<RunNeedsSpawn>,
 ) {
     if !needs_spawn.0 {
@@ -615,6 +617,8 @@ fn setup_scene(
         |map| map.0.clone(),
     );
     if game_map.is_none() {
+        *player_spawn = player_spawn_from_map(&map);
+        checkpoint.respawn = player_spawn_placement_from_map(&map);
         commands.insert_resource(GameMap(map.clone()));
     }
     for terrain in tilemap::spawn_map(&mut commands, &terrain_atlas, &map) {
@@ -624,6 +628,22 @@ fn setup_scene(
 
 fn finish_run_setup(mut needs_spawn: ResMut<RunNeedsSpawn>) {
     needs_spawn.0 = false;
+}
+
+fn player_spawn_placement_from_map(map: &map::MapData) -> PlacementId {
+    map.player_spawn
+        .map_or_else(PlacementId::default, |spawn| PlacementId {
+            x: spawn.x,
+            y: spawn.y,
+        })
+}
+
+fn player_spawn_from_map(map: &map::MapData) -> PlayerSpawn {
+    let spawn = player_spawn_placement_from_map(map);
+    PlayerSpawn(Vec2::new(
+        spawn.x as f32 * map::TILE_SIZE,
+        spawn.y as f32 * map::TILE_SIZE,
+    ))
 }
 
 /// Removes the current run and schedules its clean replacement. The map asset stays immutable
@@ -646,6 +666,7 @@ fn restart_run(
         ResMut<HealthDropSeedSequence>,
     )>,
     mut player_spawn: ResMut<PlayerSpawn>,
+    game_map: Option<Res<GameMap>>,
     mut needs_spawn: ResMut<RunNeedsSpawn>,
     mut cameras: Query<(&UnshakenCameraTransform, &mut Transform), With<Camera2d>>,
     mut next_state: ResMut<NextState<GameState>>,
@@ -671,7 +692,12 @@ fn restart_run(
             *spawn_lifecycle.p2() = spawn_lifecycle.p3().next_run_seed();
             *progress = RunProgress::default();
             *checkpoint = CheckpointSnapshot::default();
-            *player_spawn = PlayerSpawn::default();
+            if let Some(game_map) = &game_map {
+                *player_spawn = player_spawn_from_map(&game_map.0);
+                checkpoint.respawn = player_spawn_placement_from_map(&game_map.0);
+            } else {
+                *player_spawn = PlayerSpawn::default();
+            }
             next_state.set(GameState::Game);
         }
         RestartIntent::ContinueCheckpoint => {
@@ -3081,6 +3107,23 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     #[test]
+    fn map_player_spawn_converts_to_world_and_initial_checkpoint_positions() {
+        let map = map::MapData {
+            player_spawn: Some(map::MapPosition { x: 2, y: -3 }),
+            ..default()
+        };
+
+        assert_eq!(
+            player_spawn_from_map(&map).0,
+            Vec2::new(2.0 * map::TILE_SIZE, -3.0 * map::TILE_SIZE)
+        );
+        assert_eq!(
+            player_spawn_placement_from_map(&map),
+            PlacementId { x: 2, y: -3 }
+        );
+    }
+
+    #[test]
     fn dominant_axis_selects_cardinal_facing() {
         assert_eq!(
             facing_from_direction(Vec2::new(5.0, 2.0), Facing::Left),
@@ -3322,6 +3365,7 @@ mod tests {
                 })
                 .collect(),
             entities: Vec::new(),
+            player_spawn: None,
         }
     }
 

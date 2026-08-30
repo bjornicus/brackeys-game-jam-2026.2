@@ -36,11 +36,19 @@ pub struct MapEntity {
     pub kind: MapEntityKind,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MapPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct MapData {
     pub tiles: Vec<MapTile>,
     #[serde(default)]
     pub entities: Vec<MapEntity>,
+    #[serde(default)]
+    pub player_spawn: Option<MapPosition>,
 }
 
 impl MapData {
@@ -59,6 +67,7 @@ impl MapData {
         Self {
             tiles,
             entities: Vec::new(),
+            player_spawn: Some(MapPosition { x: 0, y: 0 }),
         }
     }
 
@@ -79,12 +88,19 @@ impl MapData {
         } else {
             self.tiles.push(MapTile { x, y, tile });
         }
+        if tile != TerrainTile::Floor {
+            self.remove_player_spawn(x, y);
+        }
     }
 
     pub fn remove(&mut self, x: i32, y: i32) -> bool {
         let original_len = self.tiles.len();
         self.tiles.retain(|entry| entry.x != x || entry.y != y);
-        self.tiles.len() != original_len
+        let removed = self.tiles.len() != original_len;
+        if removed {
+            self.remove_player_spawn(x, y);
+        }
+        removed
     }
 
     pub fn entity_at(&self, x: i32, y: i32) -> Option<&MapEntity> {
@@ -124,6 +140,24 @@ impl MapData {
         let original_len = self.entities.len();
         self.entities.retain(|entry| entry.x != x || entry.y != y);
         self.entities.len() != original_len
+    }
+
+    /// Moves the unique player spawn point when the target is an explicit floor tile.
+    pub fn try_set_player_spawn(&mut self, x: i32, y: i32) -> bool {
+        if !self.can_place_entity(x, y) {
+            return false;
+        }
+        self.player_spawn = Some(MapPosition { x, y });
+        true
+    }
+
+    pub fn remove_player_spawn(&mut self, x: i32, y: i32) -> bool {
+        if self.player_spawn == Some(MapPosition { x, y }) {
+            self.player_spawn = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn atlas_index_for(&self, tile: MapTile) -> usize {
@@ -181,6 +215,39 @@ mod tests {
 
         assert_eq!(map.tile_at(0, 0), Some(TerrainTile::Floor));
         assert!(map.entities.is_empty());
+        assert_eq!(map.player_spawn, None);
+    }
+
+    #[test]
+    fn player_spawn_is_unique_and_requires_floor() {
+        let mut map = MapData::default();
+        map.set(0, 0, TerrainTile::Floor);
+        map.set(1, 0, TerrainTile::Floor);
+
+        assert!(map.try_set_player_spawn(0, 0));
+        assert!(map.try_set_player_spawn(1, 0));
+        assert_eq!(map.player_spawn, Some(MapPosition { x: 1, y: 0 }));
+        assert!(!map.try_set_player_spawn(2, 0));
+        assert!(map.remove_player_spawn(1, 0));
+        assert_eq!(map.player_spawn, None);
+    }
+
+    #[test]
+    fn player_spawn_round_trips_and_is_cleared_with_its_floor() {
+        let mut map = MapData::default();
+        map.set(2, -3, TerrainTile::Floor);
+        assert!(map.try_set_player_spawn(2, -3));
+
+        let encoded = ron::ser::to_string(&map).unwrap();
+        let mut decoded: MapData = ron::de::from_str(&encoded).unwrap();
+        assert_eq!(decoded.player_spawn, Some(MapPosition { x: 2, y: -3 }));
+
+        decoded.set(2, -3, TerrainTile::Wall);
+        assert_eq!(decoded.player_spawn, None);
+        decoded.set(2, -3, TerrainTile::Floor);
+        assert!(decoded.try_set_player_spawn(2, -3));
+        assert!(decoded.remove(2, -3));
+        assert_eq!(decoded.player_spawn, None);
     }
 
     #[test]
@@ -326,6 +393,8 @@ mod tests {
         let map = load_map("initial").expect("initial map loads");
 
         assert!(!map.entities.is_empty());
+        let spawn = map.player_spawn.expect("initial map has a player spawn");
+        assert_eq!(map.tile_at(spawn.x, spawn.y), Some(TerrainTile::Floor));
         for entity in &map.entities {
             assert_eq!(
                 map.tile_at(entity.x, entity.y),

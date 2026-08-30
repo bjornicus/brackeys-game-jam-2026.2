@@ -208,6 +208,7 @@ mod tests {
                 .map(|(x, y, tile)| MapTile { x, y, tile })
                 .collect(),
             entities: Vec::new(),
+            player_spawn: None,
         }
     }
 
